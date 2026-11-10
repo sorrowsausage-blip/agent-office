@@ -252,7 +252,7 @@ export default function App() {
             <span>{tr(loading ? 'Loading workspace…' : server ? 'Showing saved activity; the API is offline.' : 'Unable to load workspace')}</span>
             {!loading && <button type="button" onClick={() => { setLoading(true); void reloadState(); }}>{tr('Retry')}</button>}
           </div>}
-          {view === 'studio' && <Studio tasks={tasks} selected={inspectedAgent} setSelected={selectAgent} selectedTask={selectedTask} setSelectedTask={setSelectedTask} onNew={() => showNew()} demo={demo} ready={cliReady}/>}
+          {view === 'studio' && <Studio tasks={tasks} selected={inspectedAgent} setSelected={selectAgent} selectedTask={selectedTask} setSelectedTask={setSelectedTask} onNew={() => showNew()} demo={demo} ready={cliReady} connected={demo ? undefined : online}/>}
           {view === 'tasks' && <TaskList tasks={tasks} onSelect={(id, taskId) => { setSelected(id); setSelectedTask(taskId); setView('studio'); }} cancel={cancel} canCancel={demo || online}/>}
           {view === 'team' && <Team tasks={tasks} onTask={showNew} onSave={saveAgent} onDelete={deleteAgent} connected={demo || online} demo={demo}/>}
           {view === 'settings' && <Settings workspace={workspace} setWorkspace={editWorkspace} demo={demo} setDemo={changeMode} server={server} online={online} publicPreview={PUBLIC_DEMO}/>}

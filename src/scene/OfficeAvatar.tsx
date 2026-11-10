@@ -46,6 +46,9 @@ export function OfficeAvatar({ agent, pose, selected, onSelect, walkRef, gaitRef
   const walkBlend = useRef(0)
   const skin = agent.id === 'sentinel' ? '#c48c70' : agent.id === 'pixel' ? '#efc8ab' : '#dbad8c'
   const hair = agent.id === 'nova' ? '#2b4058' : agent.id === 'pixel' ? '#894f47' : agent.id === 'sentinel' ? '#41332f' : '#282b43'
+  // OFFLINE reads as grey and still: the scene also passes animate={false}
+  // for offline agents, so the rig freezes with the desaturated colours.
+  const displayColor = pose === 'offline' ? '#7d8794' : agent.color
 
   useFrame(({ clock }, delta) => {
     const t = animate ? clock.elapsedTime : 0
@@ -87,19 +90,19 @@ export function OfficeAvatar({ agent, pose, selected, onSelect, walkRef, gaitRef
     onPointerOver={event => { event.stopPropagation(); document.body.style.cursor = 'pointer' }}
     onPointerOut={() => { document.body.style.cursor = 'auto' }}>
     {selected && <mesh ref={halo} position={[0, .035, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-      <torusGeometry args={[.57, .028, 8, 48]}/><meshBasicMaterial color={agent.color} toneMapped={false}/>
+      <torusGeometry args={[.57, .028, 8, 48]}/><meshBasicMaterial color={displayColor} toneMapped={false}/>
     </mesh>}
     <group ref={model}>
       <group ref={torso}>
         <RoundedBox position={[0, 1.40, -.045]} args={[.7, .70, .48]} radius={.21} castShadow>
-          <meshStandardMaterial color={agent.color} roughness={.88}/>
+          <meshStandardMaterial color={displayColor} roughness={.88}/>
         </RoundedBox>
         <RoundedBox position={[0, 1.13, -.055]} args={[.54, .23, .42]} radius={.09} castShadow>
           <meshStandardMaterial color="#344b66" roughness={.9}/>
         </RoundedBox>
         <mesh position={[0, 1.635, .214]}><boxGeometry args={[.13, .075, .014]}/><meshStandardMaterial color="#e9eef4"/></mesh>
         {[-1, 1].map(side => <RoundedBox key={side} position={[side * .365, 1.61, -.02]} args={[.245, .255, .32]} radius={.105} castShadow>
-          <meshStandardMaterial color={agent.color} roughness={.9}/>
+          <meshStandardMaterial color={displayColor} roughness={.9}/>
         </RoundedBox>)}
         <mesh position={[0, 1.775, -.015]}><cylinderGeometry args={[.105, .105, .19, 10]}/><meshStandardMaterial color={skin}/></mesh>
         <group ref={head} position={[0, 1.98, 0]}>
@@ -116,7 +119,7 @@ export function OfficeAvatar({ agent, pose, selected, onSelect, walkRef, gaitRef
       </group>
       {[-1, 1].map((side, index) => <group key={`arm-${side}`}>
         <mesh ref={node => { if (node) upperArms.current[index] = node }} castShadow>
-          <cylinderGeometry args={[.108, .112, 1, 10]}/><meshStandardMaterial color={agent.color} roughness={.88}/>
+          <cylinderGeometry args={[.108, .112, 1, 10]}/><meshStandardMaterial color={displayColor} roughness={.88}/>
         </mesh>
         <mesh ref={node => { if (node) elbows.current[index] = node }} castShadow>
           <sphereGeometry args={[.084, 10, 8]}/><meshStandardMaterial color={skin} roughness={.87}/>

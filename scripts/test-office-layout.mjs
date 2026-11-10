@@ -6,7 +6,7 @@ import { advanceMovement, CHAIR_Z, CHAIR_APPROACH_Z, createMovementState, STAND_
 import { makeAvatarRigPose } from '../src/scene/avatarRig.ts'
 import { departmentDecor, livingZoneDecor } from '../src/scene/officeDecor.ts'
 import { DEFAULT_OFFICE_PREFERENCES, normalizeOfficePreferences } from '../src/scene/officePreferences.ts'
-import { layoutGeometryKey, routeForSeat, reconcileOfficeSimulation, stepOfficeSimulation } from '../src/scene/officeSimulation.ts'
+import { layoutGeometryKey, routeForSeat, routeToCollab, reconcileOfficeSimulation, stepOfficeSimulation } from '../src/scene/officeSimulation.ts'
 
 const departments = ['architecture', 'engineering', 'design', 'quality', 'research', 'operations', 'security', 'data', 'general']
 
@@ -371,6 +371,20 @@ test('appearance preferences reject invalid persisted values and accept user sel
   assert.deepEqual(normalizeOfficePreferences({ sectorColors: { engineering: '#ff1133', hacker: '#ffffff', design: 'red' } }).sectorColors, { engineering: '#ff1133' })
 })
 
+test('behaviour preferences default to normal activity with all ambient switches on', () => {
+  assert.equal(DEFAULT_OFFICE_PREFERENCES.activityRate, 'normal')
+  assert.equal(DEFAULT_OFFICE_PREFERENCES.breaksEnabled, true)
+  assert.equal(DEFAULT_OFFICE_PREFERENCES.wanderEnabled, true)
+  assert.equal(DEFAULT_OFFICE_PREFERENCES.ambientEnabled, true)
+  assert.equal(DEFAULT_OFFICE_PREFERENCES.windowThinkingEnabled, true)
+  assert.equal(DEFAULT_OFFICE_PREFERENCES.performanceMode, 'auto')
+  const chosen = normalizeOfficePreferences({ activityRate: 'low', breaksEnabled: false, performanceMode: 'quality' })
+  assert.equal(chosen.activityRate, 'low')
+  assert.equal(chosen.breaksEnabled, false)
+  assert.equal(chosen.performanceMode, 'quality')
+  assert.equal(chosen.wanderEnabled, true)
+})
+
 test('connecting corridors remain between rooms when one department is much larger', () => {
   const team = makeTeam(2)
   const large = Array.from({ length: 110 }, (_, index) => makeAgent({
@@ -484,4 +498,27 @@ test('distant actors finish tasks and chair transitions even after focus changes
   assert.deepEqual(simulation.get(hidden).state.position, state.position, 'changing detail selection must preserve location')
   for (let i = 0; i < 200; i++) stepOfficeSimulation(simulation, visible, new Set(), .05, 'off')
   assert.equal(simulation.get(hidden).state.stage, 'standing', 'hidden agents must rise after work ends')
+})
+
+test('rest, window and whiteboard break routes stay inside the floor and off desks', () => {
+  for (const count of [1, 4, 20]) {
+    for (const spacing of ['compact', 'regular', 'spacious']) {
+      const layout = makeOfficeLayout(makeTeam(count), spacing)
+      for (const seat of layout.seats) {
+        const ordinal = layout.seats.filter(item => item.sector === seat.sector).indexOf(seat)
+        for (const destination of ['coffee', 'rest', 'window', 'collab']) {
+          const { route } = routeForSeat(layout, seat, ordinal, destination)
+          for (const [x, z] of route.points) {
+            assert.ok(x >= 0 && x <= layout.width, `${destination} route leaves the floor width`)
+            assert.ok(z >= 0 && z <= layout.depth, `${destination} route leaves the floor depth`)
+          }
+          const stop = route.points[route.breakIndex]
+          if (destination === 'rest') {
+            assert.ok(layout.restSeats.some(item => Math.abs(item.x - stop[0]) < .001 && Math.abs(item.z - (stop[1] - .98)) < .001), 'rest route must end at a sofa seat')
+          }
+          if (destination === 'collab') assert.deepEqual(routeToCollab(layout, seat, ordinal).route.points, route.points, 'collab helper must build the same route')
+        }
+      }
+    }
+  }
 })
