@@ -58,3 +58,34 @@ export function loadOfficePreferences(): OfficePreferences {
   try { return normalizeOfficePreferences(JSON.parse(localStorage.getItem(OFFICE_PREFERENCES_KEY) || 'null')) }
   catch { return { ...DEFAULT_OFFICE_PREFERENCES } }
 }
+
+export type DeviceCapabilities = { devicePixelRatio?: number; hardwareConcurrency?: number }
+
+// One observable rendering profile per performance mode. 'auto' is a fixed
+// device-capability mapping, not frame-rate sampling: sampling would need a
+// running loop plus a hysteresis policy, and a mid-task quality switch would
+// be visible as a pop. Low-end devices (high-DPR screens or few cores) get
+// the balanced profile; everything else gets quality.
+export type PerformanceSettings = {
+  mode: 'quality' | 'balanced'
+  shadows: boolean
+  shadowMapSize: number
+  dprMax: number
+  // Team size up to which every agent gets a detailed avatar; beyond it the
+  // far agents render through the cheap instanced crowd LOD.
+  crowdDetailCutoff: number
+}
+
+export function resolvePerformanceMode(mode: PerformanceMode, caps: DeviceCapabilities = {}): 'quality' | 'balanced' {
+  if (mode === 'quality') return 'quality'
+  if (mode === 'balanced') return 'balanced'
+  const dpr = caps.devicePixelRatio ?? 1
+  const cores = caps.hardwareConcurrency ?? 8
+  return dpr >= 2 || cores <= 4 ? 'balanced' : 'quality'
+}
+
+export function resolvePerformanceSettings(mode: PerformanceMode, caps: DeviceCapabilities = {}): PerformanceSettings {
+  return resolvePerformanceMode(mode, caps) === 'quality'
+    ? { mode: 'quality', shadows: true, shadowMapSize: 2048, dprMax: 1.5, crowdDetailCutoff: 50 }
+    : { mode: 'balanced', shadows: true, shadowMapSize: 1024, dprMax: 1.25, crowdDetailCutoff: 24 }
+}

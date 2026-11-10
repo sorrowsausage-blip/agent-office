@@ -62,9 +62,10 @@ export function OfficeAvatar({ agent, pose, selected, onSelect, walkRef, gaitRef
     coffeeBlend.current = MathUtils.damp(coffeeBlend.current, coffeeRef.current ? 1 : 0, 5, Math.min(delta, .05))
     coffeeTime.current = coffeeRef.current ? coffeeTime.current + Math.min(delta, .05) : 0
     if (coffeeCup.current) { coffeeCup.current.visible = coffeeBlend.current > .2; coffeeCup.current.rotation.x = -.18 * (.5 - .5 * Math.cos(coffeeTime.current * 1.35)) }
-    // 'pace' steps in place at the window: the gait advances on the clock,
-    // not on distance travelled, and the body never leaves its spot.
-    const gaitPhase = breakActivity === 'pace' ? t * 5 : gaitRef.current
+    // 'pace' steps in place at the window: its gait phase is advanced by
+    // the simulation (officeSimulation.ts), on the same clock as walking,
+    // so the legs stay continuous when pacing starts and stops.
+    const gaitPhase = gaitRef.current
     const rigActivity = breakActivity === 'read' ? 'reading' : breakActivity === 'nap' ? 'napping' : breakActivity === 'pour' ? 'pouring'
       : breakActivity === 'gaze' ? 'researching' : breakActivity === 'think' || breakActivity === 'daydream' ? 'thinking' : pose
     const rig = makeAvatarRigPose(seatedRef.current, walkBlend.current, t, rigActivity, thinkingBlend.current, gaitPhase, coffeeBlend.current, coffeeTime.current)

@@ -189,6 +189,11 @@ export function stepOfficeSimulation(simulation: OfficeSimulation, visibleIds: R
     }
     actor.state = collides ? { ...prior, walking: false } : next
     if (actor.state.walking) actor.gait += Math.hypot(actor.state.position[0] - prior.position[0], actor.state.position[1] - prior.position[1]) * (Math.PI * 2 / 1.2)
+    else if (actor.state.breakActivity === 'pace') actor.gait += dt * 5
+    // Pacing in place at the window steps on the clock, not on distance
+    // travelled — but it still advances the same gait phase, so the legs
+    // never snap when pacing starts or stops (the avatar used to rebuild
+    // the phase from the clock, which jumped against the frozen gait).
     occupied.get(cell(prior.position))?.delete(id)
     occupy(id, actor.state.position)
     if (!traveling(prior) && traveling(actor.state)) reservations.add(actor.resource)
