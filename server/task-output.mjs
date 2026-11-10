@@ -2,11 +2,36 @@ export const shrink = (value, max = 190) => String(value ?? '').replace(/[\r\n\t
 const object = value => value && typeof value === 'object' && !Array.isArray(value)
 const text = value => typeof value === 'string' ? value : ''
 
+// Weak approval-wait detection (phase 3a). The three CLIs are launched with
+// approval prompts disabled (Claude `--permission-prompts none`, Gemini
+// `--approval-mode auto_edit`, Codex `-s workspace-write`; see
+// docs/LIVING-OFFICE-PLAN.md §4), so no CLI currently emits a real approval
+// event and this will rarely fire. It only ever sets task.awaitingApproval
+// and adds a warning event; it never changes the task status or terminal
+// outcome. Only structured fields are scanned, never free agent text, to
+// keep false positives low.
+const APPROVAL_WAIT = /approval|permission|awaiting|confirm/i
+const APPROVAL_WAIT_TYPES = new Set(['permission_request', 'approval_request', 'awaiting_input', 'awaiting_approval', 'confirmation_required'])
+export function isApprovalWaitText(value) {
+  return APPROVAL_WAIT.test(String(value ?? ''))
+}
+function detectApprovalWait(task, data, addEvent) {
+  if (task.awaitingApproval) return
+  const typeHit = APPROVAL_WAIT_TYPES.has(data.type) ||
+    (typeof data.subtype === 'string' && APPROVAL_WAIT_TYPES.has(data.subtype))
+  const textHit = [data.subtype, data.message, data.error?.message]
+    .some(value => typeof value === 'string' && APPROVAL_WAIT.test(value))
+  if (!typeHit && !textHit) return
+  task.awaitingApproval = true
+  addEvent(task, 'Possible approval wait detected in provider output (unconfirmed); handle it in the terminal.', 'warning')
+}
+
 export function parseMessage(task, data, addEvent) {
   if (!object(data)) return
   const message = value => { if (text(value)) task.lastMessage = shrink(value, 500) }
   const failure = value => { task.failure = shrink(value, 500); addEvent(task, task.failure, 'error') }
   if (task.provider === 'claude') {
+    detectApprovalWait(task, data, addEvent)
     if (data.type === 'system' && text(data.session_id)) task.threadId = data.session_id
     if (data.type === 'assistant') {
       for (const block of Array.isArray(data.message?.content) ? data.message.content : []) {
@@ -30,6 +55,7 @@ export function parseMessage(task, data, addEvent) {
     return
   }
   if (task.provider === 'gemini') {
+    detectApprovalWait(task, data, addEvent)
     if (data.type === 'init' && text(data.session_id)) task.threadId = data.session_id
     if (data.type === 'tool_use' && text(data.tool_name)) {
       task.phase = /search|web/i.test(data.tool_name) ? 'researching' : 'coding'
@@ -49,6 +75,8 @@ export function parseMessage(task, data, addEvent) {
     }
     return
   }
+  // Default branch: Codex provider records.
+  detectApprovalWait(task, data, addEvent)
   if (data.type === 'thread.started' && text(data.thread_id)) task.threadId = data.thread_id
   else if (data.type === 'turn.started') { task.phase = 'thinking'; addEvent(task, 'Codex iniciou a execução.') }
   else if (['item.started', 'item.updated', 'item.completed'].includes(data.type)) {

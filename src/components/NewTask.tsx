@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { ArrowRight, Check, ShieldCheck, X } from 'lucide-react';
-import type { AgentId, ProviderId, ProviderInfo } from '../types';
+import type { AgentId, OfficeTask, ProviderId, ProviderInfo } from '../types';
 import { useAgents } from '../agents';
 import { useLanguage } from '../locales/i18n';
 import { Avatar } from './Avatar';
@@ -13,13 +13,13 @@ const defaultProviders: ProviderInfo[] = [
   { id: 'gemini', name: 'Gemini CLI', available: false },
 ];
 
-export function NewTask({ agent, setAgent, workspace, setWorkspace, close, start, busy, demo, provider, setProvider, providers, online, agentBusy, error }: {
+export function NewTask({ agent, setAgent, workspace, setWorkspace, close, start, busy, demo, provider, setProvider, providers, online, agentBusy, error, tasks }: {
   agent: AgentId;
   setAgent: (a: AgentId) => void;
   workspace: string;
   setWorkspace: (v: string) => void;
   close: () => void;
-  start: (prompt: string) => void;
+  start: (prompt: string, dependsOn?: string) => void;
   busy: boolean;
   demo: boolean;
   provider: ProviderId;
@@ -28,17 +28,21 @@ export function NewTask({ agent, setAgent, workspace, setWorkspace, close, start
   online: boolean;
   agentBusy: boolean;
   error: string;
+  tasks: OfficeTask[];
 }) {
   const { t: tr } = useLanguage();
   const agents = useAgents();
   const [prompt, setPrompt] = useState('');
+  const [dependsOn, setDependsOn] = useState('');
+  // Handoff source: another agent's recently completed tasks, newest first.
+  const handoffOptions = tasks.filter(item => item.status === 'completed' && item.agentId !== agent).slice(0, 10);
   const options = providers.length ? providers : defaultProviders;
   const blocked = demo ? '' : !online ? 'API OFFLINE' : !options.some(item => item.available) ? 'No AI provider is available.'
     : !options.some(item => item.id === provider && item.available) ? 'Choose an available AI provider.'
     : agentBusy ? 'Agent is already working.' : !isAbsoluteWorkspace(workspace) ? 'Enter an absolute project path.' : '';
 
   return <Modal close={close} busy={busy} labelledBy="new-mission">
-    <form onSubmit={event => { event.preventDefault(); if (!busy && !blocked && prompt.trim() && agents.some(item => item.id === agent)) start(prompt); }}>
+    <form onSubmit={event => { event.preventDefault(); if (!busy && !blocked && prompt.trim() && agents.some(item => item.id === agent)) start(prompt, dependsOn || undefined); }}>
       <div className="modal-title">
         <div><span className="eyebrow"><span /> {tr('A NEW MISSION')}</span><h2 id="new-mission">{tr('Create a task')} <b>✳</b></h2></div>
         <button type="button" onClick={close} disabled={busy} aria-label={tr('Close')}><X size={19}/></button>
@@ -56,6 +60,13 @@ export function NewTask({ agent, setAgent, workspace, setWorkspace, close, start
       <select id="task-provider" className="language-picker" value={provider} onChange={event => setProvider(event.target.value as ProviderId)}>
         {options.map(item => <option key={item.id} value={item.id} disabled={!demo && !item.available}>
           {item.name}{!demo && !item.available ? ` (${tr('NOT FOUND')})` : ''}
+        </option>)}
+      </select>
+      <label htmlFor="task-handoff">{tr('HANDOFF FROM')}</label>
+      <select id="task-handoff" className="language-picker" value={dependsOn} onChange={event => setDependsOn(event.target.value)}>
+        <option value="">{tr('None — start fresh')}</option>
+        {handoffOptions.map(item => <option key={item.id} value={item.id}>
+          {(agents.find(a => a.id === item.agentId)?.name || item.agentId) + ': ' + item.prompt.slice(0, 60) + (item.prompt.length > 60 ? '…' : '')}
         </option>)}
       </select>
       {!import.meta.env.MODE.includes('public-demo') && <><label htmlFor="mission-dir">{tr('PROJECT DIRECTORY')}</label>

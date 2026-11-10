@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { discoverProviders, foldersOverlap, providerCommand } from './providers.mjs'
 import { DEFAULT_AGENTS, makeAgent, validStoredAgents, validateAgent } from './agents.mjs'
 import { composeAgentPrompt } from './agent-prompt.mjs'
-import { jsonLines, parseMessage, shrink } from './task-output.mjs'
+import { isApprovalWaitText, jsonLines, parseMessage, shrink } from './task-output.mjs'
 import { terminateProcess } from './processes.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -20,6 +20,13 @@ const AGENT_STORE = join(dirname(STORE), 'agents.json')
 const PORT = Number(process.env.PORT || 4300)
 const MAX_TASKS = 150
 const MAX_PROMPT = 10000
+// Idle watchdog (phase 3a): a running task with no stdout JSON for longer
+// than this only gets a warning event, never a status change. Overridable
+// for tests via AGENT_OFFICE_IDLE_WATCHDOG_MS.
+const IDLE_WATCHDOG_MS = (() => {
+  const raw = Number(process.env.AGENT_OFFICE_IDLE_WATCHDOG_MS)
+  return Number.isFinite(raw) && raw > 0 ? raw : 10 * 60 * 1000
+})()
 const INSTANCE_ID = process.env.AGENT_OFFICE_INSTANCE_ID || randomUUID()
 let agents = DEFAULT_AGENTS.map(agent => ({ ...agent }))
 let agentsPersistChain = Promise.resolve()
@@ -55,9 +62,9 @@ app.use((req, res, next) => {
 app.use('/api', express.json({ limit: '64kb' }))
 app.use('/api', (req, res, next) => {
   res.setHeader('Cache-Control', 'no-store')
-  const emptyCancel = req.method === 'POST' && /^\/tasks\/[^/]+\/cancel$/.test(req.path) &&
+  const emptyTaskAction = req.method === 'POST' && /^\/tasks\/[^/]+\/(cancel|blocked|unblock)$/.test(req.path) &&
     !req.headers['transfer-encoding'] && (!req.headers['content-length'] || req.headers['content-length'] === '0')
-  if (['POST', 'PUT', 'PATCH'].includes(req.method) && !emptyCancel && !req.is('application/json')) {
+  if (['POST', 'PUT', 'PATCH'].includes(req.method) && !emptyTaskAction && !req.is('application/json')) {
     return res.status(415).json({ error: 'Use application/json.' })
   }
   next()
@@ -151,10 +158,12 @@ async function loadHistory() {
     const optionalText = item => item == null || typeof item === 'string'
     if (!Array.isArray(value) || !value.every(task => object(task) &&
       typeof task.id === 'string' && typeof task.agentId === 'string' && typeof task.prompt === 'string' &&
-      typeof task.workspace === 'string' && ['running', 'completed', 'failed', 'cancelled', 'interrupted'].includes(task.status) &&
+      typeof task.workspace === 'string' && ['running', 'completed', 'failed', 'cancelled', 'interrupted', 'queued'].includes(task.status) &&
       ['thinking', 'coding', 'researching', 'finishing', 'idle'].includes(task.phase) &&
       typeof task.createdAt === 'string' && typeof task.updatedAt === 'string' && optionalText(task.finishedAt) &&
       optionalText(task.agentName) && optionalText(task.failure) &&
+      (task.awaitingApproval == null || typeof task.awaitingApproval === 'boolean') &&
+      (task.dependsOn == null || typeof task.dependsOn === 'string') &&
       (task.provider == null || ['codex', 'claude', 'gemini'].includes(task.provider)) &&
       (task.usage == null || (object(task.usage) && ['input_tokens', 'output_tokens'].every(key => task.usage[key] == null ||
         (typeof task.usage[key] === 'number' && Number.isFinite(task.usage[key]))))) &&
@@ -216,6 +225,22 @@ function notifyState() {
     try { client.write(data) } catch { client.destroy(); clients.delete(client) }
   }
 }
+
+// Idle watchdog (phase 3a): a running task that produced no stdout JSON for
+// longer than IDLE_WATCHDOG_MS only gets a warning event. It never changes
+// the task status or the terminal outcome.
+function checkIdleWatchdog() {
+  const now = Date.now()
+  for (const running of active.values()) {
+    if (running.task.status !== 'running' || running.idleWarned) continue
+    if (now - running.lastOutputAt > IDLE_WATCHDOG_MS) {
+      running.idleWarned = true
+      addEvent(running.task, 'No output for a long time; the provider may be waiting for input.', 'warning')
+    }
+  }
+}
+const idleWatchdog = setInterval(checkIdleWatchdog, 1000)
+idleWatchdog.unref()
 app.get('/api/events', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream')
   res.setHeader('Cache-Control', 'no-cache')
@@ -230,10 +255,90 @@ app.get('/api/events', (req, res) => {
   res.on('error', cleanup)
 })
 
+const handoffSummary = task => shrink(task.prompt, 120)
+
+// COLLABORATING has exactly one real trigger (phase 3a): a task dependency.
+// When a prerequisite completes, both sides get a handoff event; the
+// dependent task is then dispatched through the normal launch path.
+function recordHandoff(prerequisite, dependent) {
+  const fromName = prerequisite.agentName || prerequisite.agentId
+  const toName = dependent.agentName || dependent.agentId
+  addEvent(dependent, `Handoff from ${fromName}: ${handoffSummary(prerequisite)}`)
+  addEvent(prerequisite, `Handed off to ${toName}: ${handoffSummary(dependent)}`)
+}
+
+// Add an event only when the previous one does not already say the same
+// thing, so repeated sweeps cannot spam a waiting task's timeline.
+function noteOnce(task, message, kind = 'info') {
+  if (task.events.at(-1)?.message === message) return
+  addEvent(task, message, kind)
+}
+
+// Try to launch one queued task whose prerequisite completed. Constraint
+// misses only record an event and leave the task queued; the next finish (or
+// restart) sweeps again. Returns true when the provider started.
+async function dispatchQueued(dependent) {
+  const prerequisite = tasks.find(item => item.id === dependent.dependsOn)
+  if (!prerequisite || prerequisite.status !== 'completed') return false
+  const agent = agents.find(item => item.id === dependent.agentId)
+  if (!agent) {
+    dependent.status = 'failed'; dependent.phase = 'idle'; dependent.finishedAt = stamp()
+    dependent.failure = 'Agent no longer exists.'
+    addEvent(dependent, dependent.failure, 'error')
+    await persistHistory().catch(() => {})
+    return false
+  }
+  const provider = providers.find(item => item.id === (dependent.provider || 'codex'))
+  if (!provider || !provider.available) {
+    noteOnce(dependent, `${provider?.name || dependent.provider || 'codex'} is not available; handoff waiting.`, 'warning')
+    return false
+  }
+  let canonical
+  try { canonical = realpathSync(dependent.workspace) }
+  catch {
+    dependent.status = 'failed'; dependent.phase = 'idle'; dependent.finishedAt = stamp()
+    dependent.failure = 'Project folder is no longer accessible.'
+    addEvent(dependent, dependent.failure, 'error')
+    await persistHistory().catch(() => {})
+    return false
+  }
+  if ([...active.values()].some(item => item.task.agentId === dependent.agentId)) {
+    noteOnce(dependent, `${agent.name} is already working; handoff waiting.`, 'warning')
+    return false
+  }
+  if ([...active.values()].some(item => foldersOverlap(canonical, item.canonical))) {
+    noteOnce(dependent, 'Project folder is busy; handoff waiting.', 'warning')
+    return false
+  }
+  dependent.status = 'running'; dependent.phase = 'thinking'; dependent.updatedAt = stamp()
+  recordHandoff(prerequisite, dependent)
+  return (await launchTask(dependent, agent, provider, canonical)) === 'launched'
+}
+
+// Retry every queued handoff whose prerequisite has resolved: dispatch when
+// it completed, fail the dependent when it ended any other way. Runs after
+// every task finish and once at startup.
+async function sweepQueued() {
+  let considered = false
+  for (const dependent of tasks.filter(item => item.status === 'queued' && typeof item.dependsOn === 'string')) {
+    const prerequisite = tasks.find(item => item.id === dependent.dependsOn)
+    if (!prerequisite) continue
+    considered = true
+    if (prerequisite.status === 'completed') {
+      await dispatchQueued(dependent)
+    } else if (['failed', 'cancelled', 'interrupted'].includes(prerequisite.status)) {
+      dependent.status = 'failed'; dependent.phase = 'idle'; dependent.finishedAt = stamp()
+      dependent.failure = 'Prerequisite task did not complete.'
+      addEvent(dependent, 'Prerequisite task did not complete; handoff cancelled.', 'error')
+    }
+  }
+  if (considered) await persistHistory().catch(() => {})
+}
+
 app.post('/api/tasks', async (req, res) => {
   if (!historyReadable) return res.status(503).json({ error: 'Task history is unreadable. Preserve and repair the data file before launching tasks.' })
   if (!agentsReadable) return res.status(503).json({ error: 'Agent profiles are unreadable. Preserve and repair the data file before launching tasks.' })
-  const { prompt, agentId, workspace, provider: requestedProvider = 'codex' } = req.body || {}
+  const { prompt, agentId, workspace, provider: requestedProvider = 'codex', dependsOn } = req.body || {}
   const provider = providers.find(item => item.id === requestedProvider)
   if (!provider) return res.status(400).json({ error: 'Motor de IA desconhecido.' })
   if (!provider.available) return res.status(503).json({ error: `${provider.name} não encontrado. Instale e autentique o CLI, depois reinicie o escritório.` })
@@ -250,21 +355,64 @@ app.post('/api/tasks', async (req, res) => {
   let canonical
   try { canonical = realpathSync(workspace) }
   catch { return res.status(400).json({ error: 'Não foi possível acessar a pasta do projeto.' }) }
-  if ([...active.values()].some(a => a.task.agentId === agentId)) return res.status(409).json({ error: 'Esse agente já está trabalhando.' })
-  if ([...active.values()].some(a => foldersOverlap(canonical, a.canonical))) return res.status(409).json({ error: 'Já existe uma tarefa trabalhando nessa pasta (ou numa pasta dentro dela). Aguarde ou escolha outro projeto para evitar conflitos.' })
+  // A dependency must name a real task in this repo's history; an unknown id
+  // is rejected, never silently ignored. A prerequisite that already ended
+  // without success can never unblock the dependent task.
+  let prerequisite
+  if (dependsOn !== undefined) {
+    if (typeof dependsOn !== 'string' || !dependsOn) return res.status(400).json({ error: 'Prerequisite task is invalid.' })
+    prerequisite = tasks.find(item => item.id === dependsOn)
+    if (!prerequisite) return res.status(400).json({ error: 'Prerequisite task not found.' })
+    if (['failed', 'cancelled', 'interrupted'].includes(prerequisite.status)) return res.status(400).json({ error: 'Prerequisite task did not complete.' })
+  }
+  // A task waiting on a running prerequisite is only recorded here; it is
+  // dispatched by sweepQueued() when the prerequisite completes, so the
+  // single-task-per-agent and folder-exclusion constraints are checked then,
+  // not now.
+  const queued = Boolean(prerequisite && prerequisite.status !== 'completed')
+  if (!queued) {
+    if ([...active.values()].some(a => a.task.agentId === agentId)) return res.status(409).json({ error: 'Esse agente já está trabalhando.' })
+    if ([...active.values()].some(a => foldersOverlap(canonical, a.canonical))) return res.status(409).json({ error: 'Já existe uma tarefa trabalhando nessa pasta (ou numa pasta dentro dela). Aguarde ou escolha outro projeto para evitar conflitos.' })
+  }
 
   const task = {
-    id: randomUUID(), agentId, agentName: agent.name, provider: provider.id, prompt, workspace, status: 'running', phase: 'thinking',
+    id: randomUUID(), agentId, agentName: agent.name, provider: provider.id, prompt, workspace,
+    status: queued ? 'queued' : 'running', phase: queued ? 'idle' : 'thinking',
     createdAt: stamp(), updatedAt: stamp(), finishedAt: null, lastMessage: '', events: [], threadId: null, usage: null,
+    ...(prerequisite ? { dependsOn: prerequisite.id } : {}),
   }
   tasks.unshift(task)
-  // Never evict a running job when trimming history.
-  const live = tasks.filter(item => item.status === 'running')
-  tasks = [...live, ...tasks.filter(item => item.status !== 'running').slice(0, Math.max(0, MAX_TASKS - live.length))]
-  addEvent(task, `Tarefa enviada ao ${provider.name}.`)
+  // Never evict a running or queued job when trimming history.
+  const live = tasks.filter(item => item.status === 'running' || item.status === 'queued')
+  tasks = [...live, ...tasks.filter(item => item.status !== 'running' && item.status !== 'queued').slice(0, Math.max(0, MAX_TASKS - live.length))]
+  if (prerequisite) {
+    if (queued) addEvent(task, `Waiting for ${prerequisite.agentName || prerequisite.agentId} to finish: ${shrink(prerequisite.prompt, 120)}`)
+    else recordHandoff(prerequisite, task)
+  } else {
+    addEvent(task, `Tarefa enviada ao ${provider.name}.`)
+  }
+  if (queued) {
+    try { await persistHistory() }
+    catch {
+      tasks = tasks.filter(item => item.id !== task.id)
+      return res.status(500).json({ error: 'Could not save task history.' })
+    }
+    return res.status(201).json({ task })
+  }
+  const outcome = await launchTask(task, agent, provider, canonical)
+  if (outcome === 'launched') return res.status(201).json({ task })
+  if (outcome === 'stopped') return res.status(409).json({ error: 'Task stopped before launch.' })
+  return res.status(500).json({ error: task.failure || 'Could not start task.' })
+})
 
+// Shared by POST /api/tasks and the handoff sweep: spawn the provider for an
+// already-recorded running task and wire up its output/finish handling.
+// Returns 'launched' when the provider started, 'stopped' when shutdown or a
+// pre-launch cancel intervened, and 'failed' when durable storage or spawn
+// failed. The task record already carries the outcome in the latter cases.
+async function launchTask(task, agent, provider, canonical) {
   // Reserve the agent and canonical folder before awaiting durable storage.
-  const running = { child: null, task, canonical, stopping: null }
+  const running = { child: null, task, canonical, stopping: null, lastOutputAt: Date.now(), idleWarned: false }
   active.set(task.id, running)
   try { await persistHistory() }
   catch {
@@ -272,7 +420,7 @@ app.post('/api/tasks', async (req, res) => {
     task.status = 'failed'; task.phase = 'idle'; task.finishedAt = stamp()
     task.failure = 'Could not save task history. No provider was launched.'
     addEvent(task, task.failure, 'error')
-    return res.status(500).json({ error: task.failure })
+    return 'failed'
   }
   if (shuttingDown || task.cancelRequested) {
     active.delete(task.id)
@@ -280,7 +428,7 @@ app.post('/api/tasks', async (req, res) => {
     task.phase = 'idle'; task.finishedAt = stamp()
     addEvent(task, 'Task stopped before launch.')
     await persistHistory().catch(() => {})
-    return res.status(409).json({ error: 'Task stopped before launch.' })
+    return 'stopped'
   }
 
   const executionPrompt = composeAgentPrompt(agent, task.prompt)
@@ -293,19 +441,31 @@ app.post('/api/tasks', async (req, res) => {
     task.status = 'failed'; task.phase = 'idle'; task.finishedAt = stamp()
     task.failure = shrink(error.message, 500); addEvent(task, task.failure, 'error')
     await persistHistory().catch(() => {})
-    return res.status(500).json({ error: task.failure })
+    return 'failed'
   }
   running.child = child
   running.done = new Promise(resolve => { running.resolveDone = resolve })
   let stderr = ''
-  const reader = jsonLines(data => { parseMessage(task, data, addEvent); notify() }, () => {
+  const reader = jsonLines(data => {
+    running.lastOutputAt = Date.now()
+    running.idleWarned = false
+    parseMessage(task, data, addEvent); notify()
+  }, () => {
     task.failure = 'Provider output exceeded the supported record size.'
     addEvent(task, task.failure, 'error')
   })
   child.stdout.setEncoding('utf8')
   child.stdout.on('data', chunk => reader.push(chunk))
   child.stderr.setEncoding('utf8')
-  child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-1200) })
+  child.stderr.on('data', chunk => {
+    stderr = (stderr + chunk).slice(-1200)
+    // Weak approval-wait detection on stderr (see task-output.mjs): only
+    // sets the flag, never a terminal state.
+    if (!task.awaitingApproval && isApprovalWaitText(chunk)) {
+      task.awaitingApproval = true
+      addEvent(task, 'Possible approval wait detected in provider output (unconfirmed); handle it in the terminal.', 'warning')
+    }
+  })
   child.on('error', error => { task.failure = shrink(error.message, 400); addEvent(task, task.failure, 'error') })
   running.finish = async (code, signal) => {
     if (running.finalized) return
@@ -327,6 +487,9 @@ app.post('/api/tasks', async (req, res) => {
     addEvent(task, task.status === 'completed' ? 'Tarefa concluída.' : task.status === 'cancelled' ? 'Tarefa cancelada.'
       : task.status === 'interrupted' ? 'Task interrupted by office shutdown.' : `Falha: ${task.failure}`, task.status === 'completed' ? 'success' : 'error')
     await persistHistory().catch(() => {})
+    // A finished task may unblock queued handoffs (or fail them, when this
+    // task did not complete) and frees its agent/folder for a waiting one.
+    void sweepQueued()
     running.resolveDone()
   }
   child.on('close', (code, signal) => {
@@ -337,8 +500,8 @@ app.post('/api/tasks', async (req, res) => {
     if (error.code !== 'EPIPE') { task.failure = shrink(error.message, 400); addEvent(task, task.failure, 'error') }
   })
   child.stdin.end(input)
-  res.status(201).json({ task })
-})
+  return 'launched'
+}
 
 app.post('/api/tasks/:id/cancel', async (req, res) => {
   const running = active.get(req.params.id)
@@ -356,7 +519,39 @@ app.post('/api/tasks/:id/cancel', async (req, res) => {
   }
 })
 
+// Manual approval-wait flag (phase 3a): the primary BLOCKED mechanism, since
+// no CLI emits a real approval event. Mirrors the cancel endpoint. Only a
+// running task can be flagged; anything else is a 400.
+app.post('/api/tasks/:id/blocked', async (req, res) => {
+  const task = tasks.find(item => item.id === req.params.id)
+  if (!task) return res.status(404).json({ error: 'Tarefa não encontrada.' })
+  if (task.status !== 'running' || !active.has(task.id)) return res.status(400).json({ error: 'Only a running task can be marked as waiting for approval.' })
+  if (!task.awaitingApproval) {
+    task.awaitingApproval = true
+    addEvent(task, 'Marked as waiting for approval; handle it in the terminal.', 'warning')
+  }
+  await persistHistory().catch(() => {})
+  notifyState()
+  res.json({ ok: true, task: visible(task) })
+})
+
+app.post('/api/tasks/:id/unblock', async (req, res) => {
+  const task = tasks.find(item => item.id === req.params.id)
+  if (!task) return res.status(404).json({ error: 'Tarefa não encontrada.' })
+  if (task.status !== 'running' || !active.has(task.id)) return res.status(400).json({ error: 'Only a running task can be unmarked.' })
+  if (task.awaitingApproval) {
+    delete task.awaitingApproval
+    addEvent(task, 'Approval wait cleared.')
+  }
+  await persistHistory().catch(() => {})
+  notifyState()
+  res.json({ ok: true, task: visible(task) })
+})
+
 await Promise.all([loadHistory(), loadAgents()])
+// Dispatch any handoffs whose prerequisite already completed (e.g. while the
+// office was down) and fail ones whose prerequisite ended otherwise.
+void sweepQueued()
 if (existsSync(join(ROOT, 'dist', 'index.html'))) {
   app.use(express.static(join(ROOT, 'dist')))
   app.get('/', (_req, res) => res.sendFile(join(ROOT, 'dist', 'index.html')))
@@ -381,6 +576,7 @@ let shutdownPromise
 export function shutdown() {
   return shutdownPromise ||= (async () => {
     shuttingDown = true
+    clearInterval(idleWatchdog)
     clearTimeout(persistTimer); persistTimer = undefined
     const closed = new Promise(resolve => server.close(resolve))
     const forceClose = setTimeout(() => server.closeAllConnections(), 3000)

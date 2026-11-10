@@ -8,10 +8,12 @@ const validUsage = (value: unknown) => value == null || (object(value) && ['inpu
 export function isOfficeTask(value: unknown): value is OfficeTask {
   if (!object(value)) return false;
   return text(value.id) && text(value.agentId) && text(value.prompt) && text(value.workspace) &&
-    ['running', 'completed', 'failed', 'cancelled', 'interrupted'].includes(String(value.status)) &&
+    ['running', 'completed', 'failed', 'cancelled', 'interrupted', 'queued'].includes(String(value.status)) &&
     ['thinking', 'coding', 'researching', 'finishing', 'idle'].includes(String(value.phase)) &&
     text(value.createdAt) && text(value.updatedAt) && (value.finishedAt === null || text(value.finishedAt)) &&
     (value.agentName == null || text(value.agentName)) && (value.failure == null || text(value.failure)) &&
+    (value.awaitingApproval == null || typeof value.awaitingApproval === 'boolean') &&
+    (value.dependsOn == null || text(value.dependsOn)) &&
     (value.provider == null || ['codex', 'claude', 'gemini'].includes(String(value.provider))) &&
     validUsage(value.usage) &&
     Array.isArray(value.events) && value.events.every(event => object(event) && text(event.id) && text(event.at) && text(event.kind) && text(event.message));
