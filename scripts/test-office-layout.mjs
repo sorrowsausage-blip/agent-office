@@ -4,7 +4,7 @@ import { makeOfficeLayout } from '../src/scene/officeLayout.ts'
 import { DEFAULT_AGENTS, makeAgent, validateAgent, validStoredAgents } from '../server/agents.mjs'
 import { advanceMovement, CHAIR_Z, CHAIR_APPROACH_Z, createMovementState, STAND_SIDE_X, STAND_Z, walkAt } from '../src/scene/officeMotion.ts'
 import { makeAvatarRigPose } from '../src/scene/avatarRig.ts'
-import { departmentDecor } from '../src/scene/officeDecor.ts'
+import { departmentDecor, livingZoneDecor } from '../src/scene/officeDecor.ts'
 import { DEFAULT_OFFICE_PREFERENCES, normalizeOfficePreferences } from '../src/scene/officePreferences.ts'
 import { layoutGeometryKey, routeForSeat, reconcileOfficeSimulation, stepOfficeSimulation } from '../src/scene/officeSimulation.ts'
 
@@ -194,6 +194,79 @@ test('compact floor retains clear chair approaches, back-row walkways and scaled
       }
     }
   }
+})
+
+test('living zones place rest, window and whiteboard areas inside the floor without overlap', () => {
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.z - b.z)
+  const clearOfSectors = (layout, point, margin) => layout.sectors.every(sector =>
+    Math.abs(point.x - sector.center[0]) > sector.width / 2 + margin ||
+    Math.abs(point.z - sector.center[2]) > sector.depth / 2 + margin)
+  for (const count of [0, 1, 2, 3, 4, 9, 20, 25, 100, 250]) {
+    for (const spacing of ['compact', 'regular', 'spacious']) {
+      const label = `${count}/${spacing}`
+      const layout = makeOfficeLayout(makeTeam(count), spacing)
+      // The new amenity types exist, with one rest area, two window spots and
+      // one independently named whiteboard zone.
+      assert.equal(layout.amenities.some(amenity => amenity.id === 'rest'), true, `${label} rest area missing`)
+      assert.equal(layout.amenities.filter(amenity => amenity.id === 'window').length, 2, `${label} window zone needs two thinking spots`)
+      assert.equal(layout.collabZone.key, 'collab', `${label} whiteboard zone must keep its own name`)
+      assert.equal(layout.collabZone.row, 0, `${label} whiteboard zone sits in the first row`)
+      assert.equal(layout.restSeats.length, 3, `${label} rest area needs three sofa seats`)
+      // Every zone point stays inside the floor.
+      for (const amenity of layout.amenities) {
+        assert.ok(amenity.x > 0 && amenity.x < layout.width, `${label} amenity ${amenity.key} leaves the floor width`)
+        assert.ok(amenity.z > 0 && amenity.z < layout.depth, `${label} amenity ${amenity.key} leaves the floor depth`)
+      }
+      for (const seat of layout.restSeats) {
+        assert.ok(seat.x > 0 && seat.x < layout.width, `${label} rest seat leaves the floor width`)
+        assert.ok(seat.z > 0 && seat.z < layout.depth, `${label} rest seat leaves the floor depth`)
+      }
+      assert.ok(layout.collabZone.x > 0 && layout.collabZone.x < layout.width, `${label} whiteboard zone leaves the floor width`)
+      assert.ok(layout.collabZone.z > 0 && layout.collabZone.z < layout.depth, `${label} whiteboard zone leaves the floor depth`)
+      // The rest amenity marks the middle sofa seat.
+      const rest = layout.amenities.find(amenity => amenity.id === 'rest')
+      assert.deepEqual([rest.x, rest.z], [layout.restSeats[1].x, layout.restSeats[1].z], `${label} rest amenity must mark the middle sofa seat`)
+      // Sofa seats never overlap each other or a workstation bay.
+      for (let a = 0; a < layout.restSeats.length; a++) for (let b = a + 1; b < layout.restSeats.length; b++)
+        assert.ok(dist(layout.restSeats[a], layout.restSeats[b]) >= 1.0, `${label} rest seats overlap`)
+      for (const seat of layout.restSeats) assert.equal(clearOfSectors(layout, seat, .5), true, `${label} rest seat invades a workstation bay`)
+      const lastCoffee = layout.amenities.filter(amenity => amenity.id === 'coffee').at(-1)
+      if (lastCoffee) for (const seat of layout.restSeats)
+        assert.ok(dist(seat, { x: lastCoffee.x, z: lastCoffee.z + .98 }) >= 1.0, `${label} rest seat crowds the coffee stop`)
+      // Window spots stay apart, north of reception and clear of the bays.
+      const windows = layout.amenities.filter(amenity => amenity.id === 'window')
+      assert.ok(dist(windows[0], windows[1]) >= 2.0, `${label} window spots overlap`)
+      const reception = layout.amenities.find(amenity => amenity.id === 'reception')
+      for (const spot of windows) {
+        assert.ok(dist(spot, reception) >= 2.0, `${label} window spot crowds reception`)
+        assert.equal(clearOfSectors(layout, spot, .5), true, `${label} window spot invades a workstation bay`)
+      }
+      // The whiteboard spot keeps its distance from the meeting circle, every
+      // coffee point, the rest area and the window spots.
+      const meeting = layout.amenities.find(amenity => amenity.id === 'meeting')
+      if (meeting) assert.ok(dist(layout.collabZone, meeting) >= 2.6, `${label} whiteboard zone crowds the meeting circle`)
+      for (const coffee of layout.amenities.filter(amenity => amenity.id === 'coffee'))
+        assert.ok(dist(layout.collabZone, coffee) >= 2.0, `${label} whiteboard zone crowds a coffee point`)
+      for (const seat of layout.restSeats) assert.ok(dist(layout.collabZone, seat) >= 2.0, `${label} whiteboard zone crowds the rest area`)
+      for (const spot of windows) assert.ok(dist(layout.collabZone, spot) >= 3.0, `${label} whiteboard zone crowds a window spot`)
+    }
+  }
+})
+
+test('living zone decor stays grounded and within its zone footprint', () => {
+  for (const zone of ['rest', 'window', 'collab']) {
+    const decor = livingZoneDecor(zone)
+    for (const item of decor.furniture) assert.ok(Math.abs(item.y - item.height / 2) < .001, `${zone} furniture must touch the floor`)
+    for (const item of [...decor.boards, ...decor.furniture, ...decor.planters])
+      assert.ok(Object.values(item).filter(value => typeof value === 'number').every(Number.isFinite), `${zone} decor must use finite coordinates`)
+  }
+  const rest = livingZoneDecor('rest')
+  assert.equal(rest.furniture.filter(item => item.kind === 'books').length, 1, 'rest area needs one bookshelf')
+  assert.equal(rest.planters.length, 1, 'rest area needs one plant')
+  assert.equal(livingZoneDecor('window').planters.length, 1, 'window zone needs one plant')
+  const collab = livingZoneDecor('collab')
+  assert.equal(collab.boards.length, 1, 'whiteboard zone needs one board')
+  assert.ok(collab.boards[0].w <= 1.5, 'whiteboard must fit the band between meeting and coffee')
 })
 
 test('corporate floor grows through bounded team pods with a real service wing', () => {

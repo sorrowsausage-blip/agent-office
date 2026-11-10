@@ -3,7 +3,7 @@ import { useFrame } from '@react-three/fiber'
 import { useRef } from 'react'
 import { Vector3, type Group } from 'three'
 import { DEPARTMENTS } from '../agents'
-import { departmentDecor } from './officeDecor'
+import { departmentDecor, livingZoneDecor } from './officeDecor'
 import type { Department } from '../types'
 import type { OfficeLayout, Sector } from './officeLayout'
 import type { OfficePreferences } from './officePreferences'
@@ -272,6 +272,100 @@ function SharedLounge({ x, z, theme }: { x: number; z: number; theme: OfficePref
   </group>
 }
 
+// Rest area (phase 2): three-seat sofa, rug, coffee table, bookshelf, plant
+// and a warm floor lamp, in the south-west corner below the last coffee
+// point. Sofa seats are at local x -1.15 / 0 / +1.15, matching restSeats.
+function RestArea({ x, z, theme }: { x: number; z: number; theme: OfficePreferences['theme'] }) {
+  const decor = livingZoneDecor('rest')
+  const rug = theme === 'midnight' ? '#3d5965' : theme === 'warm' ? '#dcc3a8' : '#d8c9b4'
+  return <group position={[x, 0, z]}>
+    <mesh position={[0, .003, -.5]} receiveShadow>
+      <boxGeometry args={[3.2, .006, 2.0]}/><meshStandardMaterial color={rug} roughness={1}/>
+    </mesh>
+    <RoundedBox position={[0, .21, 0]} args={[3.2, .42, .9]} radius={.09} castShadow>
+      <meshStandardMaterial color="#a87f5f" roughness={.85}/>
+    </RoundedBox>
+    <RoundedBox position={[0, .6, .42]} args={[3.2, .78, .18]} radius={.08} castShadow>
+      <meshStandardMaterial color="#a87f5f" roughness={.85}/>
+    </RoundedBox>
+    {[-1.52, 1.52].map(side => <RoundedBox key={side} position={[side, .55, 0]} args={[.16, .32, .9]} radius={.07} castShadow>
+      <meshStandardMaterial color="#9a7355" roughness={.85}/>
+    </RoundedBox>)}
+    {[-1.05, 0, 1.05].map(cx => <group key={cx}>
+      <RoundedBox position={[cx, .48, -.02]} args={[.95, .14, .78]} radius={.06}>
+        <meshStandardMaterial color="#c49a72" roughness={.9}/>
+      </RoundedBox>
+      <RoundedBox position={[cx, .72, .32]} args={[.95, .5, .12]} radius={.05}>
+        <meshStandardMaterial color="#c49a72" roughness={.9}/>
+      </RoundedBox>
+    </group>)}
+    <RoundedBox position={[-1.15, .66, .3]} args={[.34, .34, .12]} radius={.05} rotation={[0, 0, .18]}>
+      <meshStandardMaterial color="#7aabaf" roughness={.9}/>
+    </RoundedBox>
+    <RoundedBox position={[1.2, .66, .3]} args={[.34, .34, .12]} radius={.05} rotation={[0, 0, -.15]}>
+      <meshStandardMaterial color="#d2b18a" roughness={.9}/>
+    </RoundedBox>
+    <RoundedBox position={[0, .42, -1.05]} args={[1.5, .07, .6]} radius={.03} castShadow>
+      <meshStandardMaterial color="#d6c2a8" roughness={.75}/>
+    </RoundedBox>
+    <mesh position={[0, .2, -1.05]}><cylinderGeometry args={[.05, .07, .4, 10]}/><meshStandardMaterial color="#748395" metalness={.5}/></mesh>
+    <mesh position={[.45, .5, -1.05]}><cylinderGeometry args={[.07, .09, .1, 10]}/><meshStandardMaterial color="#8fa9bd"/></mesh>
+    <mesh position={[.45, .58, -1.05]}><sphereGeometry args={[.07, 10, 8]}/><meshStandardMaterial color="#6caa91" roughness={.8}/></mesh>
+    <mesh position={[-.4, .475, -1.05]}><boxGeometry args={[.34, .03, .26]}/><meshStandardMaterial color="#a6a1cc"/></mesh>
+    <mesh position={[-.4, .5, -1.05]}><boxGeometry args={[.3, .025, .22]}/><meshStandardMaterial color="#d2b18a"/></mesh>
+    {decor.furniture.map((item, i) => item.kind === 'books' && <Bookshelf key={`rest-books-${i}`} x={item.x} z={item.z}/>)}
+    {decor.planters.map((planter, i) => <Planter key={`rest-plant-${i}`} x={planter.x} z={planter.z}/>)}
+    <mesh position={[-1.65, .02, -1.15]}><cylinderGeometry args={[.12, .14, .04, 12]}/><meshStandardMaterial color="#58667b" metalness={.4}/></mesh>
+    <mesh position={[-1.65, .78, -1.15]}><cylinderGeometry args={[.02, .02, 1.5, 8]}/><meshStandardMaterial color="#58667b" metalness={.4}/></mesh>
+    <mesh position={[-1.65, 1.62, -1.15]}><cylinderGeometry args={[.16, .24, .32, 12]}/><meshStandardMaterial color="#f2ddba" emissive="#ffd9a0" emissiveIntensity={.55} roughness={.9}/></mesh>
+    <pointLight position={[-1.65, 1.55, -1.15]} intensity={.7} distance={4.5} color="#ffd9a0"/>
+  </group>
+}
+
+// Window inspiration area (phase 2): floor marker, sill bench and a plant
+// against the north glass facade. Thinking effects arrive in phase 3/4;
+// this zone is only the place.
+function WindowZone({ x, z, accent }: { x: number; z: number; accent: string }) {
+  const decor = livingZoneDecor('window')
+  return <group position={[x, 0, z]}>
+    <RoundedBox position={[0, .004, 0]} args={[1.2, .006, 1.0]} radius={.05}>
+      <meshStandardMaterial color={accent} transparent opacity={.16} depthWrite={false}/>
+    </RoundedBox>
+    <RoundedBox position={[0, .21, -.4]} args={[1.5, .42, .5]} radius={.06} castShadow>
+      <meshStandardMaterial color="#8fa9bd" roughness={.85}/>
+    </RoundedBox>
+    <RoundedBox position={[0, .47, -.4]} args={[1.4, .1, .44]} radius={.04}>
+      <meshStandardMaterial color="#dfe9ee" roughness={.9}/>
+    </RoundedBox>
+    <mesh position={[-.45, .535, -.4]}><boxGeometry args={[.3, .03, .22]}/><meshStandardMaterial color="#a6a1cc"/></mesh>
+    <mesh position={[-.45, .565, -.4]}><boxGeometry args={[.26, .03, .2]}/><meshStandardMaterial color="#d2b18a"/></mesh>
+    {decor.planters.map((planter, i) => <Planter key={`window-plant-${i}`} x={planter.x} z={planter.z}/>)}
+  </group>
+}
+
+// Whiteboard collaboration zone (phase 2): freestanding board on the west
+// glass wall, sticky notes and a floor marker for the discussion spot. The
+// board group is rotated like the meeting/focus wall panels; its absolute x
+// is pinned to .42 so it stays clear of the coffee mats to its south.
+function CollabZone({ x, z, accent, dark }: { x: number; z: number; accent: string; dark: boolean }) {
+  const decor = livingZoneDecor('collab')
+  const board = decor.boards[0]
+  return <group position={[x, 0, z]}>
+    <RoundedBox position={[0, .004, 0]} args={[1.2, .006, 1.0]} radius={.05}>
+      <meshStandardMaterial color={accent} transparent opacity={.14} depthWrite={false}/>
+    </RoundedBox>
+    <group position={[.42 - x, 0, 0]} rotation={[0, Math.PI / 2, 0]}>
+      <RoundedBox position={[0, 1.1, 0]} args={[1.5, 2.2, .14]} radius={.035}>
+        <meshStandardMaterial color={dark ? '#3a5164' : '#d9e3e8'} roughness={.85}/>
+      </RoundedBox>
+      {board && <Panel x={board.x} y={board.y} z={board.z} w={board.w} h={board.h} color={accent}/>}
+      {[[-.5, 1.15, '#e8c85a'], [.08, 1.9, '#9bc7af'], [.52, 1.2, '#e8a0a0']].map(([nx, ny, color]) => <mesh key={`${nx}-${ny}`} position={[nx as number, ny as number, .18]}>
+        <boxGeometry args={[.17, .17, .012]}/><meshStandardMaterial color={color as string} roughness={.9}/>
+      </mesh>)}
+    </group>
+  </group>
+}
+
 function CoffeePoint({ x, z }: { x: number; z: number }) {
   return <group position={[x, 0, z]}>
     <mesh position={[0, .003, 0]}><boxGeometry args={[4.9, .006, 2.25]}/><meshStandardMaterial color="#d6dfdb" roughness={1}/></mesh>
@@ -295,6 +389,37 @@ function CoffeePoint({ x, z }: { x: number; z: number }) {
     <RoundedBox position={[0, 1.95, -.5]} args={[3.5, .65, .13]} radius={.035}><meshStandardMaterial color="#c2d3d3"/></RoundedBox>
     <mesh position={[0, 1.43, -.38]}><boxGeometry args={[3.45, .65, .12]}/><meshStandardMaterial color="#9db6b4" roughness={.83}/></mesh>
     <mesh position={[0, 1.97, -.423]}><boxGeometry args={[1.7, .05, .008]}/><meshStandardMaterial color="#689b8d"/></mesh>
+    {/* Pantry dressing: the coffee corner is the pantry. Fridge and prep
+        table stand on the front (south) side, dispenser and snack cabinet on
+        the back side clear of the wall shelf; the mug tree on the prep table
+        is the cup rack. Every piece stays inside the corner mat and clear of
+        the walking stop at (0, +0.98). */}
+    <group position={[-2.2, 0, .55]}>
+      <RoundedBox position={[0, .95, 0]} args={[.7, 1.9, .65]} radius={.04} castShadow><meshStandardMaterial color="#dfe7ea" roughness={.7}/></RoundedBox>
+      <mesh position={[0, 1.3, .33]}><boxGeometry args={[.62, .02, .012]}/><meshStandardMaterial color="#9fb2bd"/></mesh>
+      <mesh position={[.22, 1.5, .34]}><boxGeometry args={[.045, .3, .03]}/><meshStandardMaterial color="#7a8b98"/></mesh>
+    </group>
+    <group position={[2.05, 0, -.55]}>
+      <mesh position={[0, .625, 0]}><boxGeometry args={[.55, 1.25, .5]}/><meshStandardMaterial color="#e8eef0" roughness={.7}/></mesh>
+      <mesh position={[0, 1.42, 0]}><cylinderGeometry args={[.17, .17, .34, 12]}/><meshStandardMaterial color="#9dc8dd" transparent opacity={.55} roughness={.3}/></mesh>
+      <mesh position={[0, .85, .27]}><boxGeometry args={[.1, .12, .05]}/><meshStandardMaterial color="#5e7a8c"/></mesh>
+      <mesh position={[0, .76, .28]}><boxGeometry args={[.2, .03, .12]}/><meshStandardMaterial color="#7a8b98"/></mesh>
+    </group>
+    <group position={[2.05, 0, .55]}>
+      <RoundedBox position={[0, .425, 0]} args={[.7, .85, .5]} radius={.04} castShadow><meshStandardMaterial color="#b98d5f" roughness={.8}/></RoundedBox>
+      <mesh position={[0, .45, .256]}><boxGeometry args={[.6, .02, .012]}/><meshStandardMaterial color="#8a6a45"/></mesh>
+      {[[-.18, '#d2b18a'], [.05, '#7aabaf'], [.24, '#a6a1cc']].map(([px, color]) => <mesh key={px as number} position={[px as number, .91, 0]}>
+        <boxGeometry args={[.16, .12, .18]}/><meshStandardMaterial color={color as string} roughness={.9}/>
+      </mesh>)}
+    </group>
+    <group position={[-2.15, 0, -.55]}>
+      <RoundedBox position={[0, .78, 0]} args={[.7, .06, .55]} radius={.02} castShadow><meshStandardMaterial color="#d6c2a8" roughness={.75}/></RoundedBox>
+      {[[-.3, -.22], [.3, -.22], [-.3, .22], [.3, .22]].map(([lx, lz]) => <mesh key={`${lx}-${lz}`} position={[lx, .39, lz]}><boxGeometry args={[.05, .78, .05]}/><meshStandardMaterial color="#8a766f"/></mesh>)}
+      <mesh position={[0, .98, 0]}><cylinderGeometry args={[.018, .018, .32, 8]}/><meshStandardMaterial color="#7a8b98" metalness={.4}/></mesh>
+      {[0, 1, 2].map(i => <mesh key={i} position={[Math.cos(i * 2.1) * .08, .9 + i * .07, Math.sin(i * 2.1) * .08]}>
+        <cylinderGeometry args={[.05, .045, .09, 10]}/><meshStandardMaterial color={['#7aabaf', '#d2b18a', '#a6a1cc'][i]}/>
+      </mesh>)}
+    </group>
   </group>
 }
 
@@ -397,8 +522,10 @@ export function OfficeCampus({ layout, preferences, detailedSectorKeys }: { layo
       : amenity.id === 'coffee'
         ? <CoffeePoint key={amenity.key} x={amenity.x} z={amenity.z}/>
         : amenity.id === 'reception' ? <Reception key={amenity.key} x={amenity.x} z={amenity.z} accent={preferences.accent}/>
+        : amenity.id === 'rest' ? <RestArea key={amenity.key} x={amenity.x} z={amenity.z} theme={preferences.theme}/>
+        : amenity.id === 'window' ? <WindowZone key={amenity.key} x={amenity.x} z={amenity.z} accent={preferences.accent}/>
         : <FocusNook key={amenity.key} x={amenity.x} z={amenity.z}/>)}
-    <SupportWing layout={layout} accent={preferences.accent} dark={preferences.theme === 'midnight'}/>
+    {layout.collabZone && <CollabZone key={layout.collabZone.key} x={layout.collabZone.x} z={layout.collabZone.z} accent={preferences.accent} dark={preferences.theme === 'midnight'}/>}    <SupportWing layout={layout} accent={preferences.accent} dark={preferences.theme === 'midnight'}/>
     <GlassFacade width={layout.width} depth={layout.depth} theme={preferences.theme}/>
     <ambientLight intensity={.47} color="#e5efff"/>
   </group>
