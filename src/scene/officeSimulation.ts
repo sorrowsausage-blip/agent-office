@@ -1,5 +1,6 @@
 import type { OfficeLayout, Seat, Sector } from './officeLayout'
 import type { OfficeMotion } from './officePreferences'
+import { catLaneZ } from './officeCat.ts'
 import { advanceMovement, CHAIR_Z, IDLE_BEFORE_LEISURE_S, STAND_SIDE_X, STAND_Z, createMovementState, makeWalkRoute, type CoffeeStop, type MovementBehaviorOptions, type MovementState, type Route } from './officeMotion.ts'
 
 export type RouteOverride = 'collab' | 'window-planning'
@@ -102,6 +103,57 @@ export function reconcileOfficeSimulation(layout: OfficeLayout, previous: Office
 
 const traveling = (state: MovementState) => ['walking', 'coffee', 'resting', 'returning'].includes(state.stage)
 
+// Give-way (phase 6): when a step would collide, the agent sidesteps to its
+// own right instead of freezing. Head-on agents face opposite ways, so
+// their right sides are opposite and they pass instead of deadlocking:
+// three agents returning at once used to freeze forever on the shared
+// spine (x = spineX), each one's next step 0.70 m from the next, with no
+// way out — the revert below retried the identical step forever. The
+// sidestep is a single 0.8 m hop — enough to clear the 0.72 m bubble on
+// its own — and only while the agent is still on its current route leg,
+// so it cannot drift sideways into furniture leg after leg. A hop back
+// toward the leg is always allowed (it rejoins instead of drifting), and
+// no hop may land inside the 0.7 m band around the cat's stroll lane —
+// the window leg runs 0.87 m north of the lane, so a south hop off it
+// would otherwise step onto the cat.
+function legOffset(route: Route, state: MovementState, position: [number, number] = state.position): number {
+  const points = state.waypoints.length ? state.waypoints : route.points
+  const cursor = state.cursor
+  if (cursor <= 0 || cursor >= points.length) return 0
+  const [ax, az] = points[cursor - 1], [bx, bz] = points[cursor]
+  const [px, pz] = position
+  const abx = bx - ax, abz = bz - az
+  const len2 = abx * abx + abz * abz
+  if (len2 < 1e-9) return 0
+  const t = Math.min(1, Math.max(0, ((px - ax) * abx + (pz - az) * abz) / len2))
+  return Math.hypot(px - (ax + abx * t), pz - (az + abz * t))
+}
+
+export function giveWayStep(id: string, route: Route, prior: MovementState, next: MovementState,
+  simulation: OfficeSimulation, layout?: OfficeLayout): [number, number] | null {
+  const offset = legOffset(route, prior)
+  const dx = next.position[0] - prior.position[0], dz = next.position[1] - prior.position[1]
+  const len = Math.hypot(dx, dz)
+  const dir: [number, number] = len > 1e-6 ? [dx / len, dz / len] : [Math.sin(next.facing), Math.cos(next.facing)]
+  // Right first (keep-right), then left.
+  for (const [sx, sz] of [[dir[1], -dir[0]], [-dir[1], dir[0]]] as [number, number][]) {
+    const candidate: [number, number] = [prior.position[0] + sx * .8, prior.position[1] + sz * .8]
+    if (layout && (candidate[0] < 0 || candidate[0] > layout.width || candidate[1] < 0 || candidate[1] > layout.depth)) continue
+    // Never step onto the cat's lane (the window leg is only 0.87 m away).
+    if (layout && Math.abs(candidate[1] - catLaneZ(layout)) < .7) continue
+    // Away from the leg only while still on it; back toward the leg is a
+    // rejoin and is always allowed, so two agents that sidestepped to the
+    // same side can still separate.
+    if (offset > .45 && legOffset(route, prior, candidate) >= offset) continue
+    let clear = true
+    for (const [otherId, other] of simulation) {
+      if (otherId !== id && Math.hypot(candidate[0] - other.state.position[0], candidate[1] - other.state.position[1]) < .72) { clear = false; break }
+    }
+    if (clear) return candidate
+  }
+  return null
+}
+
 // One complete idle visit reserves its break stop. Independent stops can
 // host simultaneous visits; actual jobs always outrank breaks. Frozen
 // (OFFLINE) agents do not move at all — they keep occupying their cell so
@@ -187,7 +239,12 @@ export function stepOfficeSimulation(simulation: OfficeSimulation, visibleIds: R
         }
       }
     }
-    actor.state = collides ? { ...prior, walking: false } : next
+    // A blocked step gives way sideways (keep-right) instead of freezing:
+    // the sidestep keeps the advanced stage/cursor but glides with the
+    // legs held (walking: false), so the gait phase never snaps.
+    const sidestep = collides ? giveWayStep(id, actor.route, prior, next, simulation, options.layout) : null
+    actor.state = sidestep ? { ...next, position: sidestep, walking: false }
+      : collides ? { ...prior, walking: false } : next
     if (actor.state.walking) actor.gait += Math.hypot(actor.state.position[0] - prior.position[0], actor.state.position[1] - prior.position[1]) * (Math.PI * 2 / 1.2)
     else if (actor.state.breakActivity === 'pace') actor.gait += dt * 5
     // Pacing in place at the window steps on the clock, not on distance
