@@ -15,7 +15,7 @@ export type AvatarRigPose = {
 }
 
 export function makeAvatarRigPose(seatedInput: number, walking: boolean | number, seconds: number,
-  activity: 'idle' | 'thinking' | 'coding' | 'researching' | 'finishing' | 'celebrating' | 'error' | 'blocked' | 'collaborating' | 'offline',
+  activity: 'idle' | 'thinking' | 'coding' | 'researching' | 'finishing' | 'celebrating' | 'error' | 'blocked' | 'collaborating' | 'offline' | 'reading' | 'napping' | 'pouring',
   thinkingProgress = activity === 'thinking' ? 1 : 0, gaitPhase = seconds * 9, coffeeProgress = 0, coffeeSeconds = seconds): AvatarRigPose {
   // Ease the body into and out of the chair so the hips and torso do not
   // stop or start at full speed. All joints share this same transition.
@@ -23,7 +23,10 @@ export function makeAvatarRigPose(seatedInput: number, walking: boolean | number
   const seated = seatProgress * seatProgress * (3 - 2 * seatProgress)
   const stride = (typeof walking === 'boolean' ? Number(walking) : Math.max(0, Math.min(1, walking))) * (1 - seated)
   const typing = seated > .94 && activity === 'coding'
-  const thinking = seated * Math.max(0, Math.min(1, thinkingProgress))
+  // Chin-on-hand thinking works standing at the window as well as seated
+  // at the desk; only a walking stride suppresses it so the arm does not
+  // fight the gait swing.
+  const thinking = Math.max(0, Math.min(1, thinkingProgress)) * (1 - stride)
   const coffee = Math.max(0, Math.min(1, coffeeProgress)) * (1 - seated) * (1 - stride)
   const sip = .5 - .5 * Math.cos(coffeeSeconds * 1.35)
   const arms = [-1, 1].map(side => {
@@ -61,6 +64,19 @@ export function makeAvatarRigPose(seatedInput: number, walking: boolean | number
       // The free hand points forward, toward the whiteboard.
       elbowX = .5; elbowY2 = 1.4; elbowZ2 = .15
       wristX2 = .34; wristY2 = 1.32; wristZ2 = .62
+    } else if (activity === 'reading') {
+      // Both hands hold a book together at chest height. Only the hands
+      // move — the shoulders, elbows and IK stay on the shared rig.
+      elbowX = side * .38; elbowY2 = 1.18; elbowZ2 = .3
+      wristX2 = side * .13; wristY2 = 1.3; wristZ2 = .48
+    } else if (activity === 'napping') {
+      // Arms slack at the sides, hands resting near the lap.
+      elbowX = side * .42; elbowY2 = 1.05; elbowZ2 = .1
+      wristX2 = side * .3; wristY2 = .92; wristZ2 = .28
+    } else if (activity === 'pouring' && side === 1) {
+      // The free hand tips the kettle over the cup; the other hand stays put.
+      elbowX = .48; elbowY2 = 1.35; elbowZ2 = .22
+      wristX2 = .3; wristY2 = 1.18; wristZ2 = .55
     }
     return {
       // The shoulders and pelvis descend together as a single body when the
@@ -114,11 +130,13 @@ export function makeAvatarRigPose(seatedInput: number, walking: boolean | number
   }) as [Leg, Leg]
   return {
     torsoDrop: seated * .4,
-    headPitch: activity === 'researching' ? -.09 : activity === 'error' ? .14 : activity === 'celebrating' ? -.06 : activity === 'blocked' ? .05 : stride * Math.sin(gaitPhase * 2) * .018,
-    headRoll: activity === 'thinking' ? Math.sin(seconds * 1.2) * .035 : stride * Math.sin(gaitPhase) * .018,
+    headPitch: activity === 'researching' ? -.09 : activity === 'error' ? .14 : activity === 'celebrating' ? -.06 : activity === 'blocked' ? .05
+      : activity === 'reading' ? .12 : activity === 'napping' ? .22 : activity === 'pouring' ? .1 : stride * Math.sin(gaitPhase * 2) * .018,
+    headRoll: activity === 'thinking' ? Math.sin(seconds * 1.2) * .035 : activity === 'napping' ? Math.sin(seconds * .8) * .02 : stride * Math.sin(gaitPhase) * .018,
     // Calm breathing keeps idle characters alive without suggesting speech
-    // or a conversation that did not occur.
-    bob: Math.sin(seconds * 2.1) * .008 * (1 - stride) * (1 - seated * .2),
+    // or a conversation that did not occur. A nap breathes slower and shallower.
+    bob: activity === 'napping' ? Math.sin(seconds * 1.1) * .005 * (1 - stride) * (1 - seated * .2)
+      : Math.sin(seconds * 2.1) * .008 * (1 - stride) * (1 - seated * .2),
     shoePitch,
     arms,
     legs,

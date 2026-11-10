@@ -282,3 +282,40 @@ test('stderr approval keywords only set the flag and never fail the task', { tim
   assert.equal(done.status, 'completed', 'A suspected wait must not become a terminal failure')
   assert.equal(done.awaitingApproval, true)
 })
+
+test('a queued task can be cancelled and is never dispatched afterwards', { timeout: 60000 }, async t => {
+  const f = await fixture(t)
+  const first = await f.launch({ prompt: 'Plan the dashboard [delayed]' })
+  assert.equal(first.status, 201)
+  const prereqId = first.body.task.id
+  const second = await f.launch({ agentId: 'nova', prompt: 'Dependent follow-up work', dependsOn: prereqId })
+  assert.equal(second.status, 201)
+  assert.equal(second.body.task.status, 'queued')
+  const cancel = await f.request(`/api/tasks/${second.body.task.id}/cancel`, 'POST')
+  assert.equal(cancel.status, 200)
+  assert.equal(cancel.body.task.status, 'cancelled')
+  assert.ok(cancel.body.task.finishedAt, 'a cancelled queued task must record when it ended')
+  assert.equal(cancel.body.task.phase, 'idle')
+  const cancelled = await f.task(second.body.task.id)
+  assert.equal(cancelled.status, 'cancelled')
+  assert.ok(cancelled.events.some(event => /cancelled/i.test(event.message)), 'the cancellation must be recorded as an event')
+  await until(async () => (await readFile(join(f.data, 'tasks.json'), 'utf8')).includes('"status": "cancelled"'))
+  // The prerequisite still completes, but the sweep must not revive the
+  // cancelled dependent — and the provider must never have run it.
+  const prereq = await until(async () => { const item = await f.task(prereqId); return item.status !== 'running' && item })
+  assert.equal(prereq.status, 'completed')
+  await sleep(500)
+  assert.equal((await f.task(second.body.task.id)).status, 'cancelled', 'sweepQueued must not dispatch a cancelled queued task')
+  const capture = JSON.parse(await readFile(f.capture, 'utf8'))
+  assert.ok(!capture.prompt.includes('Dependent follow-up work'), 'the cancelled dependent must never have been executed')
+  assert.equal((await f.request(`/api/tasks/${second.body.task.id}/cancel`, 'POST')).status, 404, 'cancelling twice must not resurrect the task')
+})
+
+test('cancelling an unknown or finished task still returns 404', { timeout: 60000 }, async t => {
+  const f = await fixture(t)
+  assert.equal((await f.request('/api/tasks/does-not-exist/cancel', 'POST')).status, 404)
+  const finished = await f.launch({ prompt: 'Quick work' })
+  const done = await until(async () => { const item = await f.task(finished.body.task.id); return item.status !== 'running' && item })
+  assert.equal(done.status, 'completed')
+  assert.equal((await f.request(`/api/tasks/${done.id}/cancel`, 'POST')).status, 404, 'a completed task is not running or queued')
+})

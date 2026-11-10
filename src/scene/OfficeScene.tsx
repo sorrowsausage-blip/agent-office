@@ -9,7 +9,7 @@ import { OfficeCampus } from './OfficeCampus'
 import { OfficeAvatar } from './OfficeAvatar'
 import { OfficeCrowdLOD } from './OfficeCrowdLOD'
 import { makeOfficeLayout, type OfficeLayout, type Seat } from './officeLayout'
-import { CHAIR_Z, STAND_Z, type MovementStage } from './officeMotion'
+import { CHAIR_Z, STAND_Z, type BreakActivity, type MovementStage } from './officeMotion'
 import { layoutGeometryKey, reconcileOfficeSimulation, stepOfficeSimulation, type OfficeSimulation } from './officeSimulation'
 import { useOfficePreferences } from './OfficePreferencesContext'
 import type { OfficePreferences } from './officePreferences'
@@ -158,6 +158,7 @@ function Workstation({ seat, simulation, selected, pose, active, onSelect, prefe
   const gaitRef = useRef(0)
   const seatedRef = useRef(0)
   const coffeeRef = useRef(false)
+  const breakActivityRef = useRef<BreakActivity>('none')
   useFrame((_, delta) => {
     if (!traveler.current) return
     const actor = simulation.current.get(agent.id)
@@ -175,14 +176,17 @@ function Workstation({ seat, simulation, selected, pose, active, onSelect, prefe
     const facing = pose === 'collaborating' && frame.stage === 'standing' && collabFacing !== undefined ? collabFacing : frame.facing
     const turn = MathUtils.euclideanModulo(facing - traveler.current.rotation.y + Math.PI, Math.PI * 2) - Math.PI
     traveler.current.rotation.y += MathUtils.clamp(turn, -smoothing * 5, smoothing * 5)
-    walkRef.current = frame.walking ? 1 : 0
+    // The mug only lifts in the last part of a pantry/rest visit (take-cup
+    // / drink); pouring and brewing keep both hands free for the rig.
+    breakActivityRef.current = frame.breakActivity ?? 'none'
+    walkRef.current = frame.walking ? 1 : (frame.breakActivity === 'pace' ? .55 : 0)
     seatedRef.current = frame.seated
-    coffeeRef.current = frame.stage === 'coffee'
+    coffeeRef.current = frame.breakActivity === 'take-cup' || frame.breakActivity === 'drink'
   }, -.75)
   return <group position={position}>
     <Desk color={seat.placement === 'lead' ? '#ba9759' : agent.color} active={active} theme={preferences.theme} />
     <group ref={node => { traveler.current = node; if (node) avatars.current.set(agent.id, node); else avatars.current.delete(agent.id) }} position={[0, 0, STAND_Z]} rotation={[0, Math.PI, 0]}>
-      <OfficeAvatar agent={agent} pose={pose} selected={selected} onSelect={onSelect} walkRef={walkRef} gaitRef={gaitRef} seatedRef={seatedRef} coffeeRef={coffeeRef} animate={preferences.motion !== 'off' && pose !== 'offline'}/>
+      <OfficeAvatar agent={agent} pose={pose} selected={selected} onSelect={onSelect} walkRef={walkRef} gaitRef={gaitRef} seatedRef={seatedRef} coffeeRef={coffeeRef} breakActivityRef={breakActivityRef} animate={preferences.motion !== 'off' && pose !== 'offline'}/>
     </group>
   </group>
 }
@@ -198,9 +202,16 @@ function Studio({ selected, tasks, onSelect, overlayId, layout, visibleSeats, di
   const activeIds = useMemo(() => new Set(tasks.filter(task => task.status === 'running').map(task => task.agentId)), [tasks])
   const frozenIds = useMemo(() => connected === false ? new Set(layout.seats.map(seat => seat.agent.id)) : new Set<string>(), [connected, layout])
   const tiers = useMemo(() => new Map([...agentStatus].map(([id, entry]) => [id, crowdTier(entry.status)])), [agentStatus])
+  // Phase 4: only real task state pulls an agent out — a running task in
+  // its thinking phase (PLANNING) to the window, a running task inside its
+  // handoff window (COLLABORATING) to the whiteboard. A completed task
+  // still showing COLLABORATING is display-only and never walks.
+  const planningIds = useMemo(() => new Set([...agentStatus].filter(([, entry]) => entry.status === 'PLANNING').map(([id]) => id)), [agentStatus])
+  const collabIds = useMemo(() => new Set([...agentStatus].filter(([, entry]) => entry.status === 'COLLABORATING' && entry.task?.status === 'running').map(([id]) => id)), [agentStatus])
   useFrame((_, delta) => stepOfficeSimulation(simulation.current, visibleIds, activeIds, delta, preferences.motion, {
     behavior: { activityRate: preferences.activityRate, breaksEnabled: preferences.breaksEnabled, wanderEnabled: preferences.wanderEnabled },
-    frozenIds,
+    frozenIds, planningIds, collabIds, layout,
+    routeOptions: { windowThinkingEnabled: preferences.windowThinkingEnabled },
   }), -1)
   // Movement-stage transitions are the only moments a BREAK status can
   // appear or clear, and they happen inside useFrame — surface the stage
@@ -218,6 +229,15 @@ function Studio({ selected, tasks, onSelect, overlayId, layout, visibleSeats, di
     if (changed) onMovementStages?.(next)
   })
   const center = layout.seats.find(seat => seat.agent.id === selected)?.position || layout.sectors[0]?.center || [0, 0, 0]
+  // The thinking lightbulb marks a window spot only while a real planning
+  // agent is parked there — never for an idle break visit, and never when
+  // ambient decoration is switched off. It is decoration, not task progress.
+  const windowThinkingKeys = new Set<string>()
+  if (preferences.ambientEnabled !== false) {
+    for (const [id, actor] of simulation.current) {
+      if (agentStatus.get(id)?.status === 'PLANNING' && actor.state.stage === 'resting' && actor.resource.startsWith('window-')) windowThinkingKeys.add(actor.resource)
+    }
+  }
   const target: [number, number, number] = overview ? [layout.width / 2, 1, layout.depth / 2] : [center[0], 1, center[2]]
   // Use the actual canvas size so every room fits on screen as the campus grows.
   // Keep enough room for badges while framing small shared offices tightly.
@@ -239,7 +259,7 @@ function Studio({ selected, tasks, onSelect, overlayId, layout, visibleSeats, di
       shadow-camera-bottom={-Math.max(16, layout.depth + 2)}
       shadow-camera-near={.5} shadow-camera-far={95}
       shadow-normalBias={.028} shadow-bias={-.0002}/>
-    <OfficeCampus layout={layout} preferences={preferences} detailedSectorKeys={detailedSectorKeys}/>
+    <OfficeCampus layout={layout} preferences={preferences} detailedSectorKeys={detailedSectorKeys} windowThinkingKeys={windowThinkingKeys}/>
     <OfficeCrowdLOD seats={distantSeats} theme={preferences.theme} tiers={tiers} simulation={simulation} onSelect={onSelect}/>
     {visibleSeats.map(seat => <Workstation key={seat.agent.id} seat={seat} simulation={simulation} active={activeIds.has(seat.agent.id)} selected={selected === seat.agent.id} pose={agentStatus.get(seat.agent.id)?.pose ?? 'idle'} collabFacing={Math.atan2(layout.collabZone.x - seat.position[0], layout.collabZone.z - seat.position[2])} onSelect={() => onSelect(seat.agent.id)} preferences={preferences} avatars={avatars}/>)}
     <BadgeProjector overlayId={overlayId} seats={visibleSeats} sectors={layout.sectors} avatars={avatars}/>

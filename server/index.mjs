@@ -505,7 +505,17 @@ async function launchTask(task, agent, provider, canonical) {
 
 app.post('/api/tasks/:id/cancel', async (req, res) => {
   const running = active.get(req.params.id)
-  if (!running) return res.status(404).json({ error: 'Tarefa em execução não encontrada.' })
+  if (!running) {
+    // Phase 4: a queued task has no provider process yet, but it can still
+    // be withdrawn — mark it cancelled so sweepQueued() never dispatches it.
+    const queued = tasks.find(item => item.id === req.params.id)
+    if (!queued || queued.status !== 'queued') return res.status(404).json({ error: 'Tarefa em execução não encontrada.' })
+    queued.status = 'cancelled'; queued.phase = 'idle'; queued.finishedAt = stamp()
+    addEvent(queued, 'Queued task cancelled.')
+    await persistHistory().catch(() => {})
+    notifyState()
+    return res.json({ ok: true, task: visible(queued) })
+  }
   if (!running.task.cancelRequested) { running.task.cancelRequested = true; addEvent(running.task, 'Cancelamento solicitado.') }
   try {
     running.stopping ||= terminateProcess(running.child)

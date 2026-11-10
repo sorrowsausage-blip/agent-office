@@ -5,6 +5,7 @@ import { MathUtils, Vector3, type Group, type Mesh } from 'three'
 import type { OfficeAgent } from '../types'
 import type { AgentPose } from './agentBehavior'
 import { makeAvatarRigPose, type RigPoint } from './avatarRig'
+import type { BreakActivity } from './officeMotion'
 
 const UP = new Vector3(0, 1, 0)
 const BONE_START = new Vector3()
@@ -22,10 +23,10 @@ function fitBone(mesh: Mesh | undefined, start: RigPoint, end: RigPoint) {
   mesh.scale.y = length
 }
 
-export function OfficeAvatar({ agent, pose, selected, onSelect, walkRef, gaitRef, seatedRef, coffeeRef, animate = true }: {
+export function OfficeAvatar({ agent, pose, selected, onSelect, walkRef, gaitRef, seatedRef, coffeeRef, animate = true, breakActivityRef }: {
   agent: OfficeAgent; pose: AgentPose; selected: boolean; onSelect: () => void
   walkRef: RefObject<number>; gaitRef: RefObject<number>; seatedRef: RefObject<number>; coffeeRef: RefObject<boolean>
-  animate?: boolean
+  animate?: boolean; breakActivityRef?: RefObject<BreakActivity>
 }) {
   const model = useRef<Group>(null)
   const torso = useRef<Group>(null)
@@ -52,12 +53,21 @@ export function OfficeAvatar({ agent, pose, selected, onSelect, walkRef, gaitRef
 
   useFrame(({ clock }, delta) => {
     const t = animate ? clock.elapsedTime : 0
-    thinkingBlend.current = MathUtils.damp(thinkingBlend.current, pose === 'thinking' ? 1 : 0, 4, Math.min(delta, .05))
+    // Break activities are decoration driven by the movement state: the
+    // task pose (coding, thinking, collaborating, …) always wins, and an
+    // activity only re-shapes the upper body while the agent is parked.
+    const breakActivity = breakActivityRef?.current ?? 'none'
+    thinkingBlend.current = MathUtils.damp(thinkingBlend.current, pose === 'thinking' || breakActivity === 'think' || breakActivity === 'daydream' ? 1 : 0, 4, Math.min(delta, .05))
     walkBlend.current = MathUtils.damp(walkBlend.current, walkRef.current, 8, Math.min(delta, .05))
     coffeeBlend.current = MathUtils.damp(coffeeBlend.current, coffeeRef.current ? 1 : 0, 5, Math.min(delta, .05))
     coffeeTime.current = coffeeRef.current ? coffeeTime.current + Math.min(delta, .05) : 0
     if (coffeeCup.current) { coffeeCup.current.visible = coffeeBlend.current > .2; coffeeCup.current.rotation.x = -.18 * (.5 - .5 * Math.cos(coffeeTime.current * 1.35)) }
-    const rig = makeAvatarRigPose(seatedRef.current, walkBlend.current, t, pose, thinkingBlend.current, gaitRef.current, coffeeBlend.current, coffeeTime.current)
+    // 'pace' steps in place at the window: the gait advances on the clock,
+    // not on distance travelled, and the body never leaves its spot.
+    const gaitPhase = breakActivity === 'pace' ? t * 5 : gaitRef.current
+    const rigActivity = breakActivity === 'read' ? 'reading' : breakActivity === 'nap' ? 'napping' : breakActivity === 'pour' ? 'pouring'
+      : breakActivity === 'gaze' ? 'researching' : breakActivity === 'think' || breakActivity === 'daydream' ? 'thinking' : pose
+    const rig = makeAvatarRigPose(seatedRef.current, walkBlend.current, t, rigActivity, thinkingBlend.current, gaitPhase, coffeeBlend.current, coffeeTime.current)
     // Breathing moves the upper body, never lifts the planted shoes off the floor.
     if (model.current) model.current.position.y = 0
     if (torso.current) {

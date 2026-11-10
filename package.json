@@ -34,7 +34,7 @@
     "lint": "oxlint",
     "preview": "vite preview --host 127.0.0.1",
     "check:server": "node --check server/index.mjs && node --check server/providers.mjs && node --check server/task-output.mjs && node --check server/processes.mjs && node --check server/agents.mjs && node --check server/agent-prompt.mjs && node --check bin/agent-office.mjs && node --check vscode-extension/extension.cjs && node --check vscode-extension/runtime.cjs",
-    "test:behavior": "node --test scripts/test-agent-behavior.mjs scripts/test-agent-status.mjs scripts/test-providers.mjs scripts/test-cli.mjs scripts/test-vscode.mjs scripts/test-office-layout.mjs scripts/test-roster-api.mjs scripts/test-agent-prompt.mjs scripts/test-task-dispatch.mjs scripts/test-task-handoff.mjs",
+    "test:behavior": "node --test scripts/test-agent-behavior.mjs scripts/test-agent-status.mjs scripts/test-providers.mjs scripts/test-cli.mjs scripts/test-vscode.mjs scripts/test-office-layout.mjs scripts/test-roster-api.mjs scripts/test-agent-prompt.mjs scripts/test-task-dispatch.mjs scripts/test-task-handoff.mjs scripts/test-living-animations.mjs",
     "package:vscode": "node scripts/prepare-vscode-package.mjs && cd vscode-extension && npm exec --yes --package=@vscode/vsce@4.0.0 -- vsce package --no-dependencies --out ../work/agent-office-vscode.vsix",
     "smoke:browser": "node scripts/smoke-browser.mjs",
     "smoke:roster": "node scripts/smoke-roster.mjs",

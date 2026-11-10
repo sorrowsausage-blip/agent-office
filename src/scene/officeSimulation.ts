@@ -1,11 +1,26 @@
 import type { OfficeLayout, Seat, Sector } from './officeLayout'
 import type { OfficeMotion } from './officePreferences'
-import { advanceMovement, CHAIR_Z, STAND_SIDE_X, STAND_Z, createMovementState, makeWalkRoute, type CoffeeStop, type MovementBehaviorOptions, type MovementState, type Route } from './officeMotion.ts'
+import { advanceMovement, CHAIR_Z, IDLE_BEFORE_LEISURE_S, STAND_SIDE_X, STAND_Z, createMovementState, makeWalkRoute, type CoffeeStop, type MovementBehaviorOptions, type MovementState, type Route } from './officeMotion.ts'
 
-export type OfficeActor = { state: MovementState; route: Route; resource: string; ordinal: number; gait: number }
+export type RouteOverride = 'collab' | 'window-planning'
+export type OfficeActor = { state: MovementState; route: Route; resource: string; ordinal: number; gait: number; routeOverride?: RouteOverride }
 export type OfficeSimulation = Map<string, OfficeActor>
 export type BreakDestination = 'coffee' | 'rest' | 'window' | 'collab'
 export type RouteDestinationOptions = { windowThinkingEnabled?: boolean }
+export type StepOfficeSimulationOptions = {
+  behavior?: MovementBehaviorOptions
+  frozenIds?: ReadonlySet<string>
+  // Agents in a live planning phase (running task, thinking phase) and
+  // agents inside a live handoff window (running task, Handoff event < 60 s
+  // ago). Both sets are derived from real task state by the caller — never
+  // from a timer or random choice — and only ever pull a standing agent.
+  planningIds?: ReadonlySet<string>
+  collabIds?: ReadonlySet<string>
+  routeOptions?: RouteDestinationOptions
+  // The layout is only needed for the phase-4 route swaps above; without
+  // it the step behaves exactly as before (no overrides applied).
+  layout?: OfficeLayout
+}
 
 export function layoutGeometryKey(layout: OfficeLayout): string {
   return JSON.stringify([layout.width, layout.depth, layout.seats.map(seat => [seat.agent.id, seat.position, seat.sectorKey]),
@@ -36,8 +51,15 @@ function stopForDestination(layout: OfficeLayout, sector: Sector, ordinal: numbe
       const spot = spots.length ? spots[ordinal % spots.length] : undefined
       return spot ? { stop: via({ x: spot.x, z: spot.z, key: spot.key, breakStage: 'resting' }), resource: spot.key } : { resource: sector.key }
     }
-    case 'collab':
-      return { stop: via({ x: layout.collabZone.x, z: layout.collabZone.z, key: layout.collabZone.key, breakStage: 'resting' }), resource: layout.collabZone.key }
+    case 'collab': {
+      // Handoff partners share the one board, so their standing spots
+      // spread along it: both must be able to arrive, and the first to
+      // leave must not step straight into the second (the 0.72 m collision
+      // check would revert its stay timer and deadlock the pair). Ordinal 0
+      // keeps the exact zone point; the others step 1.1 m aside.
+      const dx = ordinal === 0 ? 0 : ordinal % 2 === 1 ? 1.1 : -1.1
+      return { stop: via({ x: layout.collabZone.x + dx, z: layout.collabZone.z, key: layout.collabZone.key, breakStage: 'resting' }), resource: layout.collabZone.key }
+    }
   }
 }
 
@@ -64,7 +86,9 @@ export function reconcileOfficeSimulation(layout: OfficeLayout, previous: Office
     if (existing) {
       // An agent standing at home may take the newly resolved destination;
       // anyone mid-walk, mid-break or seated keeps the route they are on.
-      if (existing.state.stage === 'standing') return [seat.agent.id, { ...existing, ordinal, route: config.route, resource: config.resource }]
+      // A standing agent also drops any phase-4 override: the next frame
+      // re-applies it from live task state if it is still valid.
+      if (existing.state.stage === 'standing') return [seat.agent.id, { ...existing, ordinal, route: config.route, resource: config.resource, routeOverride: undefined }]
       return [seat.agent.id, { ...existing, ordinal }]
     }
     const state = createMovementState(config.route)
@@ -83,7 +107,7 @@ const traveling = (state: MovementState) => ['walking', 'coffee', 'resting', 're
 // (OFFLINE) agents do not move at all — they keep occupying their cell so
 // nobody walks through them.
 export function stepOfficeSimulation(simulation: OfficeSimulation, visibleIds: ReadonlySet<string>, activeIds: ReadonlySet<string>, dt: number, motion: OfficeMotion,
-  options: { behavior?: MovementBehaviorOptions; frozenIds?: ReadonlySet<string> } = {}) {
+  options: StepOfficeSimulationOptions = {}) {
   const cell = (position: [number, number]) => `${Math.floor(position[0])},${Math.floor(position[1])}`
   const occupied = new Map<string, Set<string>>()
   const occupy = (id: string, position: [number, number]) => {
@@ -92,6 +116,44 @@ export function stepOfficeSimulation(simulation: OfficeSimulation, visibleIds: R
     occupied.get(key)!.add(id)
   }
   for (const [id, actor] of simulation) occupy(id, actor.state.position)
+  // Phase 4 route overrides (strictly bounded): a standing agent may swap
+  // to the whiteboard only inside a live handoff window, and to the window
+  // only in a live planning phase — both checked here from the caller's
+  // task-derived sets, never from a timer or a random pick. The swap seeds
+  // the idle clock past the leisure gate (30 s + the largest per-agent
+  // stagger) so the agent departs on the next frame instead of waiting out
+  // another idle gap; a mid-walk, mid-break or seated agent never swaps.
+  // When the window/phase ends, a standing agent falls back to the ordinary
+  // rotation route; anyone already out is forced back by effectiveActive.
+  if (options.layout && (options.collabIds?.size || options.planningIds?.size || [...simulation.values()].some(actor => actor.routeOverride))) {
+    const layout = options.layout
+    const seatsById = new Map(layout.seats.map(seat => [seat.agent.id, seat]))
+    for (const [id, actor] of simulation) {
+      if (options.frozenIds?.has(id) || actor.state.stage !== 'standing') continue
+      const seat = seatsById.get(id)
+      if (!seat) continue
+      if (options.collabIds?.has(id)) {
+        if (actor.routeOverride !== 'collab') {
+          const config = routeToCollab(layout, seat, actor.ordinal)
+          actor.route = config.route; actor.resource = config.resource; actor.routeOverride = 'collab'
+          actor.state.idleTime = IDLE_BEFORE_LEISURE_S + 31; actor.state.nextBreakIn = 0
+        }
+        continue
+      }
+      if (options.planningIds?.has(id) && options.routeOptions?.windowThinkingEnabled !== false) {
+        if (actor.routeOverride !== 'window-planning') {
+          const config = routeForSeat(layout, seat, actor.ordinal, 'window', options.routeOptions)
+          actor.route = config.route; actor.resource = config.resource; actor.routeOverride = 'window-planning'
+          actor.state.idleTime = IDLE_BEFORE_LEISURE_S + 31; actor.state.nextBreakIn = 0
+        }
+        continue
+      }
+      if (actor.routeOverride) {
+        const config = routeForSeat(layout, seat, actor.ordinal, undefined, options.routeOptions)
+        actor.route = config.route; actor.resource = config.resource; actor.routeOverride = undefined
+      }
+    }
+  }
   const reservations = new Set([...simulation.values()].filter(actor => traveling(actor.state)).map(actor => actor.resource))
   const candidates = [...simulation.entries()].filter(([id, actor]) => visibleIds.has(id) || traveling(actor.state) || activeIds.has(id) ||
     (actor.state.stage !== 'standing' && actor.state.stage !== 'working') || (actor.state.stage === 'working' && !activeIds.has(id)))
@@ -99,7 +161,22 @@ export function stepOfficeSimulation(simulation: OfficeSimulation, visibleIds: R
   for (const [id, actor] of candidates) {
     if (options.frozenIds?.has(id)) continue
     const prior = actor.state
-    const next = advanceMovement(prior, actor.route, dt, activeIds.has(id), motion, actor.ordinal, visibleIds.has(id) && !reservations.has(actor.resource), options.behavior)
+    // A real task normally forces an immediate return — except while the
+    // agent is out on the very thing the task says: a live handoff at the
+    // whiteboard, or a live planning phase at the window. Once that window
+    // or phase ends (or the task ends), an agent already out is forced back
+    // by the second clause, exactly like a new task arriving.
+    const inCollab = actor.routeOverride === 'collab' && (options.collabIds?.has(id) ?? false)
+    const inPlanning = actor.routeOverride === 'window-planning' && (options.planningIds?.has(id) ?? false)
+    const overrideEnded = actor.routeOverride !== undefined && !inCollab && !inPlanning &&
+      ['walking', 'resting', 'coffee'].includes(prior.stage)
+    const effectiveActive = (activeIds.has(id) && !inCollab && !inPlanning) || overrideEnded
+    // Both sides of a handoff share the one whiteboard zone: the 'collab'
+    // reservation does not block a second live collaborator (the 0.72 m
+    // collision check below still keeps them from overlapping).
+    const canDepart = visibleIds.has(id) &&
+      (!reservations.has(actor.resource) || (actor.routeOverride === 'collab' && (options.collabIds?.has(id) ?? false)))
+    const next = advanceMovement(prior, actor.route, dt, effectiveActive, motion, actor.ordinal, canDepart, options.behavior)
     let collides = false
     if (next.walking) {
       const [x, z] = next.position.map(Math.floor)

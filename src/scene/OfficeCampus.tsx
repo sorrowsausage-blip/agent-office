@@ -323,9 +323,11 @@ function RestArea({ x, z, theme }: { x: number; z: number; theme: OfficePreferen
 }
 
 // Window inspiration area (phase 2): floor marker, sill bench and a plant
-// against the north glass facade. Thinking effects arrive in phase 3/4;
-// this zone is only the place.
-function WindowZone({ x, z, accent }: { x: number; z: number; accent: string }) {
+// against the north glass facade. Phase 4 adds a lightbulb and draft paper,
+// but only while a real planning agent is parked at this spot (thinking=true):
+// they are decoration marking a live planning phase, never a sign of task
+// progress — the task's real state lives in the labels and the task view.
+function WindowZone({ x, z, accent, thinking }: { x: number; z: number; accent: string; thinking?: boolean }) {
   const decor = livingZoneDecor('window')
   return <group position={[x, 0, z]}>
     <RoundedBox position={[0, .004, 0]} args={[1.2, .006, 1.0]} radius={.05}>
@@ -339,6 +341,13 @@ function WindowZone({ x, z, accent }: { x: number; z: number; accent: string }) 
     </RoundedBox>
     <mesh position={[-.45, .535, -.4]}><boxGeometry args={[.3, .03, .22]}/><meshStandardMaterial color="#a6a1cc"/></mesh>
     <mesh position={[-.45, .565, -.4]}><boxGeometry args={[.26, .03, .2]}/><meshStandardMaterial color="#d2b18a"/></mesh>
+    {thinking && <group>
+      <mesh position={[.55, 1.35, -.4]}><cylinderGeometry args={[.025, .025, 1.65, 8]}/><meshStandardMaterial color="#58667b" metalness={.4}/></mesh>
+      <mesh position={[.55, 2.22, -.4]}><sphereGeometry args={[.14, 12, 10]}/><meshStandardMaterial color="#ffd76a" emissive="#ffbf3d" emissiveIntensity={1.6} roughness={.4}/></mesh>
+      <mesh position={[.55, 2.05, -.4]}><cylinderGeometry args={[.05, .07, .09, 10]}/><meshStandardMaterial color="#58667b" metalness={.4}/></mesh>
+      <mesh position={[.1, 1.95, -.15]} rotation={[.25, .35, .12]}><boxGeometry args={[.3, .02, .4]}/><meshStandardMaterial color="#f5f8f8" roughness={.9}/></mesh>
+      <mesh position={[-.28, 1.72, -.05]} rotation={[.12, -.4, -.08]}><boxGeometry args={[.3, .02, .4]}/><meshStandardMaterial color="#eef3f6" roughness={.9}/></mesh>
+    </group>}
     {decor.planters.map((planter, i) => <Planter key={`window-plant-${i}`} x={planter.x} z={planter.z}/>)}
   </group>
 }
@@ -507,7 +516,7 @@ function GlassFacade({ width, depth, theme }: { width: number; depth: number; th
   </group>
 }
 
-export function OfficeCampus({ layout, preferences, detailedSectorKeys }: { layout: OfficeLayout; preferences: OfficePreferences; detailedSectorKeys: ReadonlySet<string> }) {
+export function OfficeCampus({ layout, preferences, detailedSectorKeys, windowThinkingKeys }: { layout: OfficeLayout; preferences: OfficePreferences; detailedSectorKeys: ReadonlySet<string>; windowThinkingKeys?: ReadonlySet<string> }) {
   const palette = THEMES[preferences.theme]
   return <group>
     <mesh position={[layout.width / 2, -.46, layout.depth / 2]} receiveShadow><boxGeometry args={[layout.width + 2.2, .7, layout.depth + 1.8]}/><meshStandardMaterial color={palette.outer} roughness={.98}/></mesh>
@@ -523,7 +532,7 @@ export function OfficeCampus({ layout, preferences, detailedSectorKeys }: { layo
         ? <CoffeePoint key={amenity.key} x={amenity.x} z={amenity.z}/>
         : amenity.id === 'reception' ? <Reception key={amenity.key} x={amenity.x} z={amenity.z} accent={preferences.accent}/>
         : amenity.id === 'rest' ? <RestArea key={amenity.key} x={amenity.x} z={amenity.z} theme={preferences.theme}/>
-        : amenity.id === 'window' ? <WindowZone key={amenity.key} x={amenity.x} z={amenity.z} accent={preferences.accent}/>
+        : amenity.id === 'window' ? <WindowZone key={amenity.key} x={amenity.x} z={amenity.z} accent={preferences.accent} thinking={windowThinkingKeys?.has(amenity.key) ?? false}/>
         : <FocusNook key={amenity.key} x={amenity.x} z={amenity.z}/>)}
     {layout.collabZone && <CollabZone key={layout.collabZone.key} x={layout.collabZone.x} z={layout.collabZone.z} accent={preferences.accent} dark={preferences.theme === 'midnight'}/>}    <SupportWing layout={layout} accent={preferences.accent} dark={preferences.theme === 'midnight'}/>
     <GlassFacade width={layout.width} depth={layout.depth} theme={preferences.theme}/>

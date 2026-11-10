@@ -2,7 +2,8 @@ import type { Seat, Sector } from './officeLayout'
 import type { ActivityRate, OfficeMotion } from './officePreferences'
 
 export type Point = [number, number]
-export type Route = { points: Point[]; durations: number[]; total: number; breakIndex: number; breakStage: 'coffee' | 'resting' }
+export type BreakKind = 'coffee' | 'rest' | 'window' | 'collab'
+export type Route = { points: Point[]; durations: number[]; total: number; breakIndex: number; breakStage: 'coffee' | 'resting'; breakKind?: BreakKind }
 // A break stop is any amenity an idle visit can end at: the coffee point
 // ('coffee'), a rest sofa seat or a window thinking spot ('resting'), or
 // the whiteboard ('resting'). The route shape is the same aisle network in
@@ -26,6 +27,13 @@ export function makeWalkRoute(seat: Seat, sector: Sector, slot: number, coffee?:
   const sideAisle = leftEdge + .55
   const front = coffee?.aisleZ ?? sector.center[2] + sector.depth / 2 - .88
   const loungeX = leftEdge + 1.2 + (slot % 3) * .65
+  // The stop key names the destination, so the route itself can tell the
+  // pantry, the sofa, the window and the whiteboard apart — all four share
+  // the 'resting' stage, only the break kind differs.
+  const breakKind: BreakKind | undefined = coffee?.key === 'collab' ? 'collab'
+    : coffee?.key?.startsWith('rest-') ? 'rest'
+    : coffee?.key?.startsWith('window-') ? 'window'
+    : coffee?.key?.startsWith('coffee-') ? 'coffee' : undefined
   const points: Point[] = coffee ? [
     [x + STAND_SIDE_X, z + STAND_Z], [x + STAND_SIDE_X, z + AISLE_Z], [sideAisle, z + AISLE_Z], [sideAisle, front],
     [coffee.spineX ?? sideAisle, front], [coffee.spineX ?? sideAisle, coffee.z + .98],
@@ -39,7 +47,7 @@ export function makeWalkRoute(seat: Seat, sector: Sector, slot: number, coffee?:
   const breakIndex = coffee ? 6 : 4
   const durations = points.slice(1).map((point, index) => Math.hypot(point[0] - points[index][0], point[1] - points[index][1]) / 1.3)
   return { points, durations, total: durations.reduce((sum, seconds) => sum + seconds, 0) + 12,
-    breakIndex, breakStage: coffee?.breakStage ?? (coffee ? 'coffee' : 'resting') }
+    breakIndex, breakStage: coffee?.breakStage ?? (coffee ? 'coffee' : 'resting'), breakKind }
 }
 
 // Leisure timing (phase 3b, initial configuration — all read from the
@@ -63,6 +71,44 @@ export function leisureAttemptIntervalSeconds(rate: ActivityRate, ordinal: numbe
 
 export function leisureStaySeconds(_breakStage: 'coffee' | 'resting', ordinal: number): number {
   return LEISURE_STAY_MIN_S + ((ordinal * 13) % (LEISURE_STAY_MAX_S - LEISURE_STAY_MIN_S + 1))
+}
+
+// What the avatar is visibly doing while parked at a break stop. This is
+// decoration only: it never changes a task, a status or a pose priority —
+// the status machine (agentStatus.ts) stays the only source of truth for
+// what the agent is doing. Derived purely from the stop kind and the time
+// already spent there, so it is deterministic and testable.
+export type BreakActivity =
+  | 'none'
+  | 'pour' | 'brew' | 'take-cup'
+  | 'sit' | 'read' | 'drink' | 'daydream' | 'nap'
+  | 'gaze' | 'think' | 'pace'
+  | 'discuss'
+
+export function breakActivityFor(breakKind: BreakKind | undefined, stage: MovementStage, wait: number, ordinal: number): BreakActivity {
+  if (stage === 'coffee') {
+    const stay = leisureStaySeconds('coffee', ordinal)
+    if (wait < stay / 3) return 'pour'
+    if (wait < stay * 2 / 3) return 'brew'
+    return 'take-cup'
+  }
+  if (stage !== 'resting') return 'none'
+  const stay = leisureStaySeconds('resting', ordinal)
+  if (breakKind === 'rest') {
+    const fifth = stay / 5
+    if (wait < fifth) return 'sit'
+    if (wait < fifth * 2) return 'read'
+    if (wait < fifth * 3) return 'drink'
+    if (wait < fifth * 4) return 'daydream'
+    return 'nap'
+  }
+  if (breakKind === 'window') {
+    if (wait < stay / 3) return 'gaze'
+    if (wait < stay * 2 / 3) return 'think'
+    return 'pace'
+  }
+  if (breakKind === 'collab') return 'discuss'
+  return 'none'
 }
 
 export function walkAt(route: Route, seconds: number, motion: OfficeMotion): { position: Point; walking: boolean; resting: boolean; facing: number } {
@@ -101,11 +147,13 @@ export type MovementState = {
   // Cooldown (seconds) before the next leisure departure may be attempted.
   // Counts down only while standing idle; 0 means an attempt is allowed.
   nextBreakIn: number
+  // Visible break activity while parked at a stop ('none' everywhere else).
+  breakActivity: BreakActivity
 }
 
 export function createMovementState(route: Route): MovementState {
   return { stage: 'standing', position: [...route.points[0]], facing: DESK_FACING, seated: 0,
-    walking: false, cursor: 0, waypoints: [], wait: 0, idleTime: 0, nextBreakIn: 0 }
+    walking: false, cursor: 0, waypoints: [], wait: 0, idleTime: 0, nextBreakIn: 0, breakActivity: 'none' }
 }
 
 // A task event changes the movement goal, not the avatar's coordinates.
@@ -125,6 +173,7 @@ export function advanceMovement(state: MovementState, route: Route, dt: number, 
     next.waypoints = outbound ? route.points.slice(0, next.cursor).reverse() : route.points.slice(next.cursor)
     next.cursor = 0
     next.stage = 'returning'
+    next.breakActivity = 'none'
   }
   if (active && next.stage === 'rising') next.stage = 'sitting'
   if (active && next.stage === 'leaving') {
@@ -169,6 +218,7 @@ export function advanceMovement(state: MovementState, route: Route, dt: number, 
   if (next.stage === 'standing') {
     next.position = [...home]
     next.facing = DESK_FACING
+    next.breakActivity = 'none'
     if (!active && motion !== 'off') {
       next.idleTime += step * (motion === 'subtle' ? .45 : 1)
       next.nextBreakIn = Math.max(0, next.nextBreakIn - step)
@@ -185,9 +235,11 @@ export function advanceMovement(state: MovementState, route: Route, dt: number, 
   }
   if (next.stage === 'resting' || next.stage === 'coffee') {
     next.wait += step
+    next.breakActivity = breakActivityFor(route.breakKind, next.stage, next.wait, ordinal)
     if (next.wait < leisureStaySeconds(route.breakStage, ordinal)) return next
     next.stage = 'walking'
     next.cursor = route.breakIndex + 1
+    next.breakActivity = 'none'
   }
   if (next.stage === 'approaching' || next.stage === 'leaving') {
     const target = next.waypoints[next.cursor]
@@ -243,6 +295,7 @@ export function advanceMovement(state: MovementState, route: Route, dt: number, 
       next.stage = route.breakStage
       next.wait = 0
       next.walking = false
+      next.breakActivity = breakActivityFor(route.breakKind, route.breakStage, 0, ordinal)
       if (route.breakStage === 'coffee') next.facing = DESK_FACING
     }
     else if (next.cursor >= points.length) {
