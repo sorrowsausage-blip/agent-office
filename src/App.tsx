@@ -143,7 +143,7 @@ export default function App() {
     if (!agents.length) { setView('team'); notice(tr('Add an agent to create tasks'), 'info'); return; }
     selectAgent(agent || resolvedSelected); setModal(true);
   }
-  async function start(prompt: string) {
+  async function start(prompt: string, dependsOn?: string) {
     if (starting.current || !prompt.trim() || prompt.length > 10000 || !agents.some(agent => agent.id === resolvedSelected)) return;
     const blocked = !demo && (!online ? 'API OFFLINE' : !server?.providers.some(item => item.id === provider && item.available) ? 'Choose an available AI provider.'
       : tasks.some(task => task.agentId === resolvedSelected && task.status === 'running') ? 'Agent is already working.'
@@ -153,7 +153,7 @@ export default function App() {
     try {
       if (demo) {
         const id = 'demo-' + crypto.randomUUID(), stamp = new Date().toISOString();
-        const task: OfficeTask = { id, prompt: prompt.trim(), agentId: resolvedSelected, agentName: agents.find(agent => agent.id === resolvedSelected)?.name, provider, workspace: 'Demo workspace', status: 'running', phase: 'thinking', createdAt: stamp, updatedAt: stamp, finishedAt: null, lastMessage: '', threadId: null, events: [{ id: id + 'e', at: stamp, kind: 'info', message: 'Preview started. No code is executed.' }] };
+        const task: OfficeTask = { id, prompt: prompt.trim(), agentId: resolvedSelected, agentName: agents.find(agent => agent.id === resolvedSelected)?.name, provider, workspace: 'Demo workspace', status: 'running', phase: 'thinking', createdAt: stamp, updatedAt: stamp, finishedAt: null, lastMessage: '', threadId: null, ...(dependsOn ? { dependsOn } : {}), events: [{ id: id + 'e', at: stamp, kind: 'info', message: 'Preview started. No code is executed.' }] };
         setDemoData(value => [task, ...value]); setSelectedTask(id);
         notice(tr('Demo task started · preview only'));
         const advance = (complete: boolean) => setDemoData(value => value.map(item => {
@@ -166,7 +166,7 @@ export default function App() {
       } else {
         let response: Response;
         try {
-          response = await fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agentId: resolvedSelected, provider, prompt: prompt.trim(), workspace }), signal: AbortSignal.timeout(15000) });
+          response = await fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agentId: resolvedSelected, provider, prompt: prompt.trim(), workspace, ...(dependsOn ? { dependsOn } : {}) }), signal: AbortSignal.timeout(15000) });
         } catch { throw new Error(tr('No confirmation received. Check task history before trying again.')); }
         const result = await readResponse(response, tr(response.ok ? 'No confirmation received. Check task history before trying again.' : 'Could not start task'));
         if (!isOfficeTask(result.task) || result.task.agentId !== resolvedSelected) throw new Error(tr('No confirmation received. Check task history before trying again.'));
@@ -252,14 +252,14 @@ export default function App() {
             <span>{tr(loading ? 'Loading workspace…' : server ? 'Showing saved activity; the API is offline.' : 'Unable to load workspace')}</span>
             {!loading && <button type="button" onClick={() => { setLoading(true); void reloadState(); }}>{tr('Retry')}</button>}
           </div>}
-          {view === 'studio' && <Studio tasks={tasks} selected={inspectedAgent} setSelected={selectAgent} selectedTask={selectedTask} setSelectedTask={setSelectedTask} onNew={() => showNew()} demo={demo} ready={cliReady}/>}
+          {view === 'studio' && <Studio tasks={tasks} selected={inspectedAgent} setSelected={selectAgent} selectedTask={selectedTask} setSelectedTask={setSelectedTask} onNew={() => showNew()} demo={demo} ready={cliReady} connected={demo ? undefined : online}/>}
           {view === 'tasks' && <TaskList tasks={tasks} onSelect={(id, taskId) => { setSelected(id); setSelectedTask(taskId); setView('studio'); }} cancel={cancel} canCancel={demo || online}/>}
           {view === 'team' && <Team tasks={tasks} onTask={showNew} onSave={saveAgent} onDelete={deleteAgent} connected={demo || online} demo={demo}/>}
           {view === 'settings' && <Settings workspace={workspace} setWorkspace={editWorkspace} demo={demo} setDemo={changeMode} server={server} online={online} publicPreview={PUBLIC_DEMO}/>}
         </main>
         <footer><span>© 2026 Agent Office <b>✳</b>{' ' + tr('Made for builders')}</span><span>v0.4.0 <i>·</i>{' ' + tr('Open source')}</span></footer>
       </div>
-      {modal && agents.length > 0 && <NewTask agent={resolvedSelected} setAgent={selectAgent} provider={provider} setProvider={chooseProvider} providers={server?.providers || []} workspace={workspace} setWorkspace={editWorkspace} close={() => setModal(false)} start={start} busy={busy} demo={demo} online={online} agentBusy={tasks.some(task => task.agentId === resolvedSelected && task.status === 'running')} error={taskError}/>}
+      {modal && agents.length > 0 && <NewTask agent={resolvedSelected} setAgent={selectAgent} provider={provider} setProvider={chooseProvider} providers={server?.providers || []} workspace={workspace} setWorkspace={editWorkspace} close={() => setModal(false)} start={start} busy={busy} demo={demo} online={online} agentBusy={tasks.some(task => task.agentId === resolvedSelected && task.status === 'running')} error={taskError} tasks={tasks}/>}
       {toast && <div className={'toast toast-' + toast.kind} role={toast.kind === 'error' ? 'alert' : 'status'}><ToastIcon size={17}/>{toast.message}<button onClick={() => { window.clearTimeout(toastTimer.current); setToast(null); }} aria-label={tr('Dismiss toast')}><X size={14}/></button></div>}
     </div>
   </AgentsContext.Provider></OfficePreferencesContext.Provider>;

@@ -1,6 +1,6 @@
 import type { AgentId, OfficeTask, TaskPhase } from '../types'
 
-export type AgentPose = TaskPhase | 'celebrating' | 'error'
+export type AgentPose = TaskPhase | 'celebrating' | 'error' | 'blocked' | 'collaborating' | 'offline'
 
 // A finished task briefly triggers an acknowledgement, then the avatar rests.
 // This is a visualization of the task's reported state, not proof of actions.

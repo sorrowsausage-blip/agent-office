@@ -2,14 +2,17 @@ import { useCallback, useLayoutEffect, useMemo, useRef, type RefObject } from 'r
 import { useFrame } from '@react-three/fiber'
 import { Color, Object3D, Vector3, type InstancedMesh } from 'three'
 import { makeAvatarRigPose, type RigPoint } from './avatarRig'
+import { type CrowdTier } from './agentStatus'
 import type { Seat } from './officeLayout'
 import { CHAIR_Z } from './officeMotion'
 import type { OfficePreferences } from './officePreferences'
 import type { OfficeSimulation } from './officeSimulation'
 
 // All people retain the same world state when switching between detail levels.
-export function OfficeCrowdLOD({ seats, theme, working, simulation, onSelect }: {
-  seats: Seat[]; theme: OfficePreferences['theme']; working: ReadonlySet<string>
+// Far-view avatars keep only three tiers (WORKING/IDLE/BREAK); the full ten
+// states live in the detailed scene and the labels.
+export function OfficeCrowdLOD({ seats, theme, tiers, simulation, onSelect }: {
+  seats: Seat[]; theme: OfficePreferences['theme']; tiers: ReadonlyMap<string, CrowdTier>
   simulation: RefObject<OfficeSimulation>; onSelect: (agentId: string) => void
 }) {
   const tabletops = useRef<InstancedMesh>(null), deskLegs = useRef<InstancedMesh>(null)
@@ -39,7 +42,7 @@ export function OfficeCrowdLOD({ seats, theme, working, simulation, onSelect }: 
       }
       const personX = state.position[0], personZ = state.position[1], c = Math.cos(state.facing), s = Math.sin(state.facing)
       const world = (point: RigPoint): RigPoint => [personX + point[0] * c + point[2] * s, point[1], personZ - point[0] * s + point[2] * c]
-      const rig = makeAvatarRigPose(state.seated, state.walking, 0, working.has(seat.agent.id) ? 'coding' : 'idle', 0, actor.gait)
+      const rig = makeAvatarRigPose(state.seated, state.walking, 0, tiers.get(seat.agent.id) === 'WORKING' ? 'coding' : 'idle', 0, actor.gait)
       const bone = (mesh: InstancedMesh | null, start: RigPoint, end: RigPoint, boneIndex: number) => {
         if (!mesh) return
         const a = world(start), b = world(end)
@@ -81,7 +84,7 @@ export function OfficeCrowdLOD({ seats, theme, working, simulation, onSelect }: 
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
       mesh.computeBoundingSphere()
     }
-  }, [seats, working, simulation, scratch])
+  }, [seats, tiers, simulation, scratch])
   useLayoutEffect(() => { cache.current.clear(); apply(false) }, [apply])
   useFrame(() => apply(true))
   if (!seats.length) return null

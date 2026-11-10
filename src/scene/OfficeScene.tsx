@@ -1,21 +1,25 @@
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls, OrthographicCamera, RoundedBox } from '@react-three/drei'
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
-import type { Group, Mesh } from 'three'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import type { DirectionalLight, Group, Mesh } from 'three'
 import { MathUtils, Vector3 } from 'three'
 import { type AgentId, type OfficeTask } from '../types'
 import { DEPARTMENTS, useAgents } from '../agents'
 import { OfficeCampus } from './OfficeCampus'
 import { OfficeAvatar } from './OfficeAvatar'
+import { OfficeCat } from './OfficeCat'
 import { OfficeCrowdLOD } from './OfficeCrowdLOD'
 import { makeOfficeLayout, type OfficeLayout, type Seat } from './officeLayout'
-import { CHAIR_Z, STAND_Z } from './officeMotion'
+import { CHAIR_Z, STAND_Z, type BreakActivity, type MovementStage } from './officeMotion'
 import { layoutGeometryKey, reconcileOfficeSimulation, stepOfficeSimulation, type OfficeSimulation } from './officeSimulation'
 import { useOfficePreferences } from './OfficePreferencesContext'
-import type { OfficePreferences } from './officePreferences'
+import type { OfficePreferences, PerformanceSettings } from './officePreferences'
+import { resolvePerformanceSettings } from './officePreferences'
+import { naturalLightAt } from './naturalLight'
 import { useLanguage } from '../locales/i18n'
-import { phaseName, statusName } from '../components/taskDisplay'
-import { resolveAgentPose, selectAgentTask, TERMINAL_POSE_MS, type AgentPose } from './agentBehavior'
+import { agentStatusName } from '../components/taskDisplay'
+import { crowdTier, describeAgent, settleAgentStatus, statusToPose, type AgentStatusEntry, type OfficeAgentStatus, type SettledStatus } from './agentStatus'
+import { TERMINAL_POSE_MS, type AgentPose } from './agentBehavior'
 
 // Project world positions to the existing React DOM layer without creating
 // separate React roots inside Three.js (which can race during unmount).
@@ -82,12 +86,16 @@ function FollowSelected({ selected, overview, avatars, center }: { selected: str
   return null
 }
 
-function Desk({ color, active, theme }: { color: string; active: boolean; theme: OfficePreferences['theme'] }) {
+function Desk({ color, active, theme, onSelect }: { color: string; active: boolean; theme: OfficePreferences['theme']; onSelect: () => void }) {
   const monitor = useRef<Mesh>(null)
   useFrame(state => {
     if (monitor.current) (monitor.current.material as { emissiveIntensity?: number }).emissiveIntensity = active ? .33 + Math.sin(state.clock.elapsedTime * 2.7) * .14 : .08
   })
-  return <group>
+  // Clicking a desk selects its agent, exactly like clicking the person:
+  // the inspector and the execution panel jump to that agent's task view.
+  return <group onClick={event => { event.stopPropagation(); onSelect() }}
+    onPointerOver={event => { event.stopPropagation(); document.body.style.cursor = 'pointer' }}
+    onPointerOut={() => { document.body.style.cursor = 'auto' }}>
     {/* One workstation is a complete, grounded furniture cluster. The low
         carpet defines each desk without blocking a neighbouring aisle. */}
     <mesh position={[0, .003, .23]} receiveShadow>
@@ -148,8 +156,8 @@ function Desk({ color, active, theme }: { color: string; active: boolean; theme:
   </group>
 }
 
-function Workstation({ seat, simulation, selected, pose, active, onSelect, preferences, avatars }: {
-  seat: Seat; simulation: RefObject<OfficeSimulation>; selected: boolean; pose: AgentPose; active: boolean; onSelect: () => void; preferences: OfficePreferences; avatars: RefObject<Map<string, Group>>
+function Workstation({ seat, simulation, selected, pose, active, onSelect, preferences, avatars, collabFacing }: {
+  seat: Seat; simulation: RefObject<OfficeSimulation>; selected: boolean; pose: AgentPose; active: boolean; onSelect: () => void; preferences: OfficePreferences; avatars: RefObject<Map<string, Group>>; collabFacing?: number
 }) {
   const { agent, position } = seat
   const traveler = useRef<Group>(null)
@@ -157,6 +165,7 @@ function Workstation({ seat, simulation, selected, pose, active, onSelect, prefe
   const gaitRef = useRef(0)
   const seatedRef = useRef(0)
   const coffeeRef = useRef(false)
+  const breakActivityRef = useRef<BreakActivity>('none')
   useFrame((_, delta) => {
     if (!traveler.current) return
     const actor = simulation.current.get(agent.id)
@@ -169,33 +178,83 @@ function Workstation({ seat, simulation, selected, pose, active, onSelect, prefe
     const smoothing = Math.min(delta, .05)
     traveler.current.position.x = frame.position[0] - position[0]
     traveler.current.position.z = frame.position[1] - position[2]
-    const turn = MathUtils.euclideanModulo(frame.facing - traveler.current.rotation.y + Math.PI, Math.PI * 2) - Math.PI
+    // A collaborating agent standing at the desk turns toward the
+    // whiteboard; every other facing comes from the movement state.
+    const facing = pose === 'collaborating' && frame.stage === 'standing' && collabFacing !== undefined ? collabFacing : frame.facing
+    const turn = MathUtils.euclideanModulo(facing - traveler.current.rotation.y + Math.PI, Math.PI * 2) - Math.PI
     traveler.current.rotation.y += MathUtils.clamp(turn, -smoothing * 5, smoothing * 5)
-    walkRef.current = frame.walking ? 1 : 0
+    // The mug only lifts in the last part of a pantry/rest visit (take-cup
+    // / drink); pouring and brewing keep both hands free for the rig.
+    breakActivityRef.current = frame.breakActivity ?? 'none'
+    walkRef.current = frame.walking ? 1 : (frame.breakActivity === 'pace' ? .55 : 0)
     seatedRef.current = frame.seated
-    coffeeRef.current = frame.stage === 'coffee'
+    coffeeRef.current = frame.breakActivity === 'take-cup' || frame.breakActivity === 'drink'
   }, -.75)
   return <group position={position}>
-    <Desk color={seat.placement === 'lead' ? '#ba9759' : agent.color} active={active} theme={preferences.theme} />
+    <Desk color={seat.placement === 'lead' ? '#ba9759' : agent.color} active={active} theme={preferences.theme} onSelect={onSelect} />
     <group ref={node => { traveler.current = node; if (node) avatars.current.set(agent.id, node); else avatars.current.delete(agent.id) }} position={[0, 0, STAND_Z]} rotation={[0, Math.PI, 0]}>
-      <OfficeAvatar agent={agent} pose={pose} selected={selected} onSelect={onSelect} walkRef={walkRef} gaitRef={gaitRef} seatedRef={seatedRef} coffeeRef={coffeeRef} animate={preferences.motion !== 'off'}/>
+      <OfficeAvatar agent={agent} pose={pose} selected={selected} onSelect={onSelect} walkRef={walkRef} gaitRef={gaitRef} seatedRef={seatedRef} coffeeRef={coffeeRef} breakActivityRef={breakActivityRef} animate={preferences.motion !== 'off' && pose !== 'offline'}/>
     </group>
   </group>
 }
 
-function Studio({ selected, tasks, onSelect, now, overlayId, layout, visibleSeats, distantSeats, overview, preferences }: { selected: AgentId; tasks: OfficeTask[]; onSelect: (value: AgentId) => void; now: number; overlayId: string; layout: OfficeLayout; visibleSeats: Seat[]; distantSeats: Seat[]; overview: boolean; preferences: OfficePreferences }) {
+function Studio({ selected, tasks, onSelect, overlayId, layout, visibleSeats, distantSeats, overview, preferences, simulation, agentStatus, connected, onMovementStages, performance }: {
+  selected: AgentId; tasks: OfficeTask[]; onSelect: (value: AgentId) => void; overlayId: string; layout: OfficeLayout; visibleSeats: Seat[]; distantSeats: Seat[]; overview: boolean; preferences: OfficePreferences
+  simulation: RefObject<OfficeSimulation>; agentStatus: ReadonlyMap<string, AgentStatusEntry>; connected?: boolean; onMovementStages?: (stages: ReadonlyMap<string, MovementStage>) => void; performance: PerformanceSettings
+}) {
   const { size } = useThree()
   const avatars = useRef(new Map<string, Group>())
-  const [initialSimulation] = useState(() => reconcileOfficeSimulation(layout, new Map(), new Set(tasks.filter(task => task.status === 'running').map(task => task.agentId))))
-  const simulation = useRef<OfficeSimulation>(initialSimulation)
-  useLayoutEffect(() => {
-    simulation.current = reconcileOfficeSimulation(layout, simulation.current)
-  }, [layout])
+  const sun = useRef<DirectionalLight>(null)
+  // Natural light (phase 5): the one directional sun drifts slowly warm,
+  // gated by ambientEnabled — off freezes it at the neutral noon value.
+  // The drift is small on purpose so labels and avatars stay readable.
+  useFrame(({ clock }) => {
+    if (!sun.current) return
+    const light = naturalLightAt(clock.elapsedTime, preferences.ambientEnabled)
+    sun.current.intensity = light.intensity
+    sun.current.color.set(light.color)
+  })
   const visibleIds = useMemo(() => new Set(visibleSeats.map(seat => seat.agent.id)), [visibleSeats])
   const detailedSectorKeys = useMemo(() => new Set(visibleSeats.map(seat => seat.sectorKey)), [visibleSeats])
   const activeIds = useMemo(() => new Set(tasks.filter(task => task.status === 'running').map(task => task.agentId)), [tasks])
-  useFrame((_, delta) => stepOfficeSimulation(simulation.current, visibleIds, activeIds, delta, preferences.motion), -1)
+  const frozenIds = useMemo(() => connected === false ? new Set(layout.seats.map(seat => seat.agent.id)) : new Set<string>(), [connected, layout])
+  const tiers = useMemo(() => new Map([...agentStatus].map(([id, entry]) => [id, crowdTier(entry.status)])), [agentStatus])
+  // Phase 4: only real task state pulls an agent out — a running task in
+  // its thinking phase (PLANNING) to the window, a running task inside its
+  // handoff window (COLLABORATING) to the whiteboard. A completed task
+  // still showing COLLABORATING is display-only and never walks.
+  const planningIds = useMemo(() => new Set([...agentStatus].filter(([, entry]) => entry.status === 'PLANNING').map(([id]) => id)), [agentStatus])
+  const collabIds = useMemo(() => new Set([...agentStatus].filter(([, entry]) => entry.status === 'COLLABORATING' && entry.task?.status === 'running').map(([id]) => id)), [agentStatus])
+  useFrame((_, delta) => stepOfficeSimulation(simulation.current, visibleIds, activeIds, delta, preferences.motion, {
+    behavior: { activityRate: preferences.activityRate, breaksEnabled: preferences.breaksEnabled, wanderEnabled: preferences.wanderEnabled },
+    frozenIds, planningIds, collabIds, layout,
+    routeOptions: { windowThinkingEnabled: preferences.windowThinkingEnabled },
+  }), -1)
+  // Movement-stage transitions are the only moments a BREAK status can
+  // appear or clear, and they happen inside useFrame — surface the stage
+  // map to the outer scene so the status labels recompute without a task
+  // snapshot.
+  const stageSnapshot = useRef(new Map<string, MovementStage>())
+  useFrame(() => {
+    let changed = false
+    const next = new Map<string, MovementStage>()
+    for (const [id, actor] of simulation.current) {
+      next.set(id, actor.state.stage)
+      if (stageSnapshot.current.get(id) !== actor.state.stage) changed = true
+    }
+    stageSnapshot.current = next
+    if (changed) onMovementStages?.(next)
+  })
   const center = layout.seats.find(seat => seat.agent.id === selected)?.position || layout.sectors[0]?.center || [0, 0, 0]
+  // The thinking lightbulb marks a window spot only while a real planning
+  // agent is parked there — never for an idle break visit, and never when
+  // ambient decoration is switched off. It is decoration, not task progress.
+  const windowThinkingKeys = new Set<string>()
+  if (preferences.ambientEnabled !== false) {
+    for (const [id, actor] of simulation.current) {
+      if (agentStatus.get(id)?.status === 'PLANNING' && actor.state.stage === 'resting' && actor.resource.startsWith('window-')) windowThinkingKeys.add(actor.resource)
+    }
+  }
   const target: [number, number, number] = overview ? [layout.width / 2, 1, layout.depth / 2] : [center[0], 1, center[2]]
   // Use the actual canvas size so every room fits on screen as the campus grows.
   // Keep enough room for badges while framing small shared offices tightly.
@@ -208,18 +267,19 @@ function Studio({ selected, tasks, onSelect, now, overlayId, layout, visibleSeat
     <color attach="background" args={[preferences.theme === 'midnight' ? '#111b2e' : preferences.theme === 'warm' ? '#efe6df' : '#edf5fa']} />
     <ambientLight intensity={1.3} color="#d8e7ff" />
     <hemisphereLight args={['#aac6eb', '#293852', 1.7]} />
-    <directionalLight position={[7, 14, 12]} intensity={2.4} color="#f4ecdc"
-      castShadow={layout.seats.length <= 12}
-      shadow-mapSize-width={2048} shadow-mapSize-height={2048}
+    <directionalLight ref={sun} position={[7, 14, 12]} intensity={2.4} color="#f4ecdc"
+      castShadow={performance.shadows && layout.seats.length <= 12}
+      shadow-mapSize-width={performance.shadowMapSize} shadow-mapSize-height={performance.shadowMapSize}
       shadow-camera-left={-Math.max(16, layout.width + 2)}
       shadow-camera-right={Math.max(16, layout.width + 2)}
       shadow-camera-top={Math.max(16, layout.depth + 2)}
       shadow-camera-bottom={-Math.max(16, layout.depth + 2)}
       shadow-camera-near={.5} shadow-camera-far={95}
       shadow-normalBias={.028} shadow-bias={-.0002}/>
-    <OfficeCampus layout={layout} preferences={preferences} detailedSectorKeys={detailedSectorKeys}/>
-    <OfficeCrowdLOD seats={distantSeats} theme={preferences.theme} working={activeIds} simulation={simulation} onSelect={onSelect}/>
-    {visibleSeats.map(seat => <Workstation key={seat.agent.id} seat={seat} simulation={simulation} active={activeIds.has(seat.agent.id)} selected={selected === seat.agent.id} pose={resolveAgentPose(selectAgentTask(tasks, seat.agent.id, now), now)} onSelect={() => onSelect(seat.agent.id)} preferences={preferences} avatars={avatars}/>)}
+    <OfficeCampus layout={layout} preferences={preferences} detailedSectorKeys={detailedSectorKeys} windowThinkingKeys={windowThinkingKeys}/>
+    <OfficeCat layout={layout} ambientEnabled={preferences.ambientEnabled}/>
+    <OfficeCrowdLOD seats={distantSeats} theme={preferences.theme} tiers={tiers} simulation={simulation} onSelect={onSelect}/>
+    {visibleSeats.map(seat => <Workstation key={seat.agent.id} seat={seat} simulation={simulation} active={activeIds.has(seat.agent.id)} selected={selected === seat.agent.id} pose={agentStatus.get(seat.agent.id)?.pose ?? 'idle'} collabFacing={Math.atan2(layout.collabZone.x - seat.position[0], layout.collabZone.z - seat.position[2])} onSelect={() => onSelect(seat.agent.id)} preferences={preferences} avatars={avatars}/>)}
     <BadgeProjector overlayId={overlayId} seats={visibleSeats} sectors={layout.sectors} avatars={avatars}/>
     <OrthographicCamera key={`${cameraKey}-camera`} makeDefault position={[target[0] + 15, target[1] + 17, target[2] + 19]} zoom={overview ? overviewZoom : 42} near={.1} far={Math.max(250, layout.width + layout.depth + 100)} />
     <OrbitControls key={`${cameraKey}-controls`} makeDefault target={target} minPolarAngle={.25} maxPolarAngle={1.46} enablePan enableDamping dampingFactor={.08} minZoom={overview ? Math.min(2, overviewZoom) : 12} maxZoom={165} />
@@ -227,10 +287,16 @@ function Studio({ selected, tasks, onSelect, now, overlayId, layout, visibleSeat
   </>
 }
 
-export default function OfficeScene({ selected, tasks, onSelect, overview = false }: { selected: AgentId; tasks: OfficeTask[]; onSelect: (value: AgentId) => void; overview?: boolean }) {
+export default function OfficeScene({ selected, tasks, onSelect, overview = false, connected, onAgentStatus }: { selected: AgentId; tasks: OfficeTask[]; onSelect: (value: AgentId) => void; overview?: boolean; connected?: boolean; onAgentStatus?: (statuses: ReadonlyMap<string, OfficeAgentStatus>) => void }) {
   const { t: tr } = useLanguage()
   const agents = useAgents()
   const { preferences } = useOfficePreferences()
+  // Performance profile (phase 5): resolved from the mode plus this
+  // device's capabilities; drives canvas DPR, shadow map size and the
+  // detailed-avatar cutoff below.
+  const performance = useMemo(() => resolvePerformanceSettings(preferences.performanceMode, {
+    devicePixelRatio: window.devicePixelRatio, hardwareConcurrency: navigator.hardwareConcurrency,
+  }), [preferences.performanceMode])
   const [reducedMotion, setReducedMotion] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches)
   useEffect(() => {
     const query = window.matchMedia('(prefers-reduced-motion: reduce)')
@@ -266,22 +332,77 @@ export default function OfficeScene({ selected, tasks, onSelect, overview = fals
     return () => timers.forEach(window.clearTimeout)
   }, [desiredKey])
   const layout = presentation.layout
+  // The simulation lives here (not in Studio) so the ten-state status map
+  // below can read live movement stages — BREAK is a movement fact, not a
+  // task fact — while Studio keeps driving the frames.
+  const [initialSimulation] = useState(() => reconcileOfficeSimulation(layout, new Map(), new Set(tasks.filter(task => task.status === 'running').map(task => task.agentId)), { windowThinkingEnabled: preferences.windowThinkingEnabled }))
+  const simulation = useRef<OfficeSimulation>(initialSimulation)
+  useLayoutEffect(() => {
+    simulation.current = reconcileOfficeSimulation(layout, simulation.current, undefined, { windowThinkingEnabled: preferences.windowThinkingEnabled })
+  }, [layout, preferences.windowThinkingEnabled])
   // Keep nearby stations detailed at large team sizes; focus another agent to inspect their wing.
+  // The cutoff comes from the performance profile: balanced mode sends
+  // more agents to the cheap instanced crowd LOD.
   const visibleSeats = useMemo(() => {
-    if (layout.seats.length <= 50) return layout.seats
+    if (layout.seats.length <= performance.crowdDetailCutoff) return layout.seats
     const selectedSeat = layout.seats.find(seat => seat.agent.id === selected) || layout.seats[0]
     return [...layout.seats].sort((a, b) => {
       const dist = (seat: Seat) => (seat.position[0] - selectedSeat.position[0]) ** 2 + (seat.position[2] - selectedSeat.position[2]) ** 2
       return dist(a) - dist(b)
-    }).slice(0, 50)
-  }, [layout, selected])
+    }).slice(0, performance.crowdDetailCutoff)
+  }, [layout, selected, performance])
   const distantSeats = useMemo(() => {
-    if (layout.seats.length <= 50) return []
+    if (layout.seats.length <= performance.crowdDetailCutoff) return []
     const close = new Set(visibleSeats.map(seat => seat.agent.id))
     return layout.seats.filter(seat => !close.has(seat.agent.id))
-  }, [layout, visibleSeats])
+  }, [layout, visibleSeats, performance])
   const overlayId = useId()
   const [now, setNow] = useState(() => Date.now())
+  // Live movement stages, lifted from Studio's frame loop (state, not a
+  // ref, so the status map below can derive from them during render).
+  const [movementStages, setMovementStages] = useState<ReadonlyMap<string, MovementStage>>(() => new Map())
+  const handleMovementStages = useCallback((stages: ReadonlyMap<string, MovementStage>) => {
+    setMovementStages(stages)
+    setNow(() => Date.now())
+  }, [])
+  const rawAgentStatus = useMemo(() => {
+    const map = new Map<string, AgentStatusEntry>()
+    for (const seat of layout.seats) {
+      const stage = movementStages.get(seat.agent.id)
+      map.set(seat.agent.id, describeAgent(tasks, seat.agent.id, stage ? { stage } : undefined, { connected }, now))
+    }
+    return map
+  }, [layout, tasks, now, connected, movementStages])
+  // Status changes are debounced per agent (see settleAgentStatus): a burst
+  // of task events cannot flap the avatar, while a higher-priority status
+  // still cuts through immediately. The debounce memory is adjusted during
+  // render — the React-endorsed way to derive state from props — and only
+  // when a switch actually happened, so the adjustment terminates.
+  const [settledStatuses, setSettledStatuses] = useState<ReadonlyMap<string, SettledStatus>>(() => new Map())
+  let settledStatusesNext: Map<string, SettledStatus> | null = null
+  const agentStatus = new Map<string, AgentStatusEntry>()
+  for (const [id, raw] of rawAgentStatus) {
+    const previous = settledStatuses.get(id)
+    const settled = settleAgentStatus(previous, raw.status, now)
+    agentStatus.set(id, { status: settled.status, pose: statusToPose(settled.status), task: raw.task })
+    if (!previous || previous.status !== settled.status || previous.since !== settled.since) {
+      settledStatusesNext ??= new Map(settledStatuses)
+      settledStatusesNext.set(id, settled)
+    }
+  }
+  if (settledStatusesNext) setSettledStatuses(settledStatusesNext)
+  // Lift the settled ten-state map to the parent (Studio's inspector) only
+  // when a status actually changes. This effect deliberately has no dep
+  // list — agentStatus is rebuilt every render, so no dep list could be
+  // both correct and stable — and the serialized key guard keeps the
+  // callback from re-rendering the parent unless something changed.
+  const lastStatusKey = useRef('')
+  useEffect(() => {
+    const key = [...agentStatus.entries()].map(([id, entry]) => `${id}:${entry.status}`).sort().join('|')
+    if (key === lastStatusKey.current) return
+    lastStatusKey.current = key
+    onAgentStatus?.(new Map([...agentStatus].map(([id, entry]) => [id, entry.status])))
+  })
   useEffect(() => {
     const timeout = window.setTimeout(() => setNow(Date.now()), 0)
     return () => window.clearTimeout(timeout)
@@ -296,17 +417,17 @@ export default function OfficeScene({ selected, tasks, onSelect, overview = fals
     return () => window.clearTimeout(timeout)
   }, [tasks, now])
   return <div className="office-3d-shell" data-office-theme={preferences.theme} data-office-motion={effectivePreferences.motion} data-layout-transition={presentation.phase} aria-busy={presentation.phase !== 'ready'}>
-    <Canvas shadows dpr={[1, 1.5]} gl={{ antialias: true, alpha: false }} onPointerMissed={() => { }}>
-      <Studio key={presentation.key} selected={selected} tasks={tasks} onSelect={onSelect} now={now} overlayId={overlayId} layout={layout} visibleSeats={visibleSeats} distantSeats={distantSeats} overview={overview} preferences={effectivePreferences}/>
+    <Canvas shadows dpr={[1, performance.dprMax]} gl={{ antialias: true, alpha: false }} onPointerMissed={() => { }}>
+      <Studio key={presentation.key} selected={selected} tasks={tasks} onSelect={onSelect} overlayId={overlayId} layout={layout} visibleSeats={visibleSeats} distantSeats={distantSeats} overview={overview} preferences={effectivePreferences} simulation={simulation} agentStatus={agentStatus} connected={connected} onMovementStages={handleMovementStages} performance={performance}/>
     </Canvas>
     {presentation.phase === 'closing' && <div className="scene-layout-loading" role="status">{tr('Loading 3D office…')}</div>}
     <div id={overlayId} className={`scene-phase-overlay${overview ? ' is-overview' : ''}`} aria-label={tr('Current phase')}>
       {visibleSeats.map(({ agent }) => {
-        const task = selectAgentTask(tasks, agent.id, now)
-        const pose = resolveAgentPose(task, now)
-        const text = pose === 'celebrating' ? statusName.completed : pose === 'error' ? statusName[task?.status || 'failed'] : phaseName[pose]
-        return <span key={agent.id} className={`scene-phase-label phase-${pose}${overview && pose === 'idle' ? ' overview-idle' : ''}`} data-agent={agent.id} data-pose={pose}>
-          <i aria-hidden="true" />{tr(text)}
+        const entry = agentStatus.get(agent.id)
+        const status = entry?.status ?? 'IDLE'
+        const pose = entry?.pose ?? 'idle'
+        return <span key={agent.id} className={`scene-phase-label phase-${pose}${overview && pose === 'idle' ? ' overview-idle' : ''}`} data-agent={agent.id} data-pose={pose} data-status={status}>
+          <i aria-hidden="true" />{tr(agentStatusName[status])}
         </span>
       })}
       {layout.sectors.map(sector => <span key={sector.key} className="scene-sector-label" data-sector={sector.key}>

@@ -15,7 +15,7 @@ export type AvatarRigPose = {
 }
 
 export function makeAvatarRigPose(seatedInput: number, walking: boolean | number, seconds: number,
-  activity: 'idle' | 'thinking' | 'coding' | 'researching' | 'finishing' | 'celebrating' | 'error',
+  activity: 'idle' | 'thinking' | 'coding' | 'researching' | 'finishing' | 'celebrating' | 'error' | 'blocked' | 'collaborating' | 'offline' | 'reading' | 'napping' | 'pouring',
   thinkingProgress = activity === 'thinking' ? 1 : 0, gaitPhase = seconds * 9, coffeeProgress = 0, coffeeSeconds = seconds): AvatarRigPose {
   // Ease the body into and out of the chair so the hips and torso do not
   // stop or start at full speed. All joints share this same transition.
@@ -23,7 +23,10 @@ export function makeAvatarRigPose(seatedInput: number, walking: boolean | number
   const seated = seatProgress * seatProgress * (3 - 2 * seatProgress)
   const stride = (typeof walking === 'boolean' ? Number(walking) : Math.max(0, Math.min(1, walking))) * (1 - seated)
   const typing = seated > .94 && activity === 'coding'
-  const thinking = seated * Math.max(0, Math.min(1, thinkingProgress))
+  // Chin-on-hand thinking works standing at the window as well as seated
+  // at the desk; only a walking stride suppresses it so the arm does not
+  // fight the gait swing.
+  const thinking = Math.max(0, Math.min(1, thinkingProgress)) * (1 - stride)
   const coffee = Math.max(0, Math.min(1, coffeeProgress)) * (1 - seated) * (1 - stride)
   const sip = .5 - .5 * Math.cos(coffeeSeconds * 1.35)
   const arms = [-1, 1].map(side => {
@@ -42,16 +45,49 @@ export function makeAvatarRigPose(seatedInput: number, walking: boolean | number
     const elbowZ = .025 + seated * .43 - phase * .08 + contemplation * .07
     const wristY = baseWristY + contemplation * (1.50 - baseWristY) + (typing && side === 1 ? Math.sin(seconds * 12) * .016 : 0)
     const wristZ = baseWristZ + contemplation * (.27 - baseWristZ) + (typing && side === 1 ? Math.cos(seconds * 12) * .014 : 0)
+    // New poses reuse the same shoulder/elbow/wrist joints, so no limb can
+    // detach: only the endpoints move, and every override fades with the
+    // seated blend (a seated celebration keeps its hands near the desk
+    // instead of stretching the arms overhead).
+    const lift = 1 - seated * .7
+    let elbowX = side * (.44 + seated * .06) - contemplation * .04
+    let elbowY2 = elbowY, elbowZ2 = elbowZ
+    let wristX2 = wristX, wristY2 = wristY, wristZ2 = wristZ
+    if (activity === 'celebrating') {
+      elbowX = side * .55; elbowY2 = 1.28 + lift * .3; elbowZ2 = .025
+      wristX2 = side * .45; wristY2 = baseWristY + lift * .85; wristZ2 = .12 + lift * .05
+    } else if (activity === 'blocked') {
+      // A small shrug: both palms open slightly out to the sides.
+      elbowX = side * .55; elbowY2 = 1.28 + lift * .06; elbowZ2 = .025
+      wristX2 = side * .62; wristY2 = baseWristY + lift * .12; wristZ2 = baseWristZ + lift * .18
+    } else if (activity === 'collaborating' && side === 1) {
+      // The free hand points forward, toward the whiteboard.
+      elbowX = .5; elbowY2 = 1.4; elbowZ2 = .15
+      wristX2 = .34; wristY2 = 1.32; wristZ2 = .62
+    } else if (activity === 'reading') {
+      // Both hands hold a book together at chest height. Only the hands
+      // move — the shoulders, elbows and IK stay on the shared rig.
+      elbowX = side * .38; elbowY2 = 1.18; elbowZ2 = .3
+      wristX2 = side * .13; wristY2 = 1.3; wristZ2 = .48
+    } else if (activity === 'napping') {
+      // Arms slack at the sides, hands resting near the lap.
+      elbowX = side * .42; elbowY2 = 1.05; elbowZ2 = .1
+      wristX2 = side * .3; wristY2 = .92; wristZ2 = .28
+    } else if (activity === 'pouring' && side === 1) {
+      // The free hand tips the kettle over the cup; the other hand stays put.
+      elbowX = .48; elbowY2 = 1.35; elbowZ2 = .22
+      wristX2 = .3; wristY2 = 1.18; wristZ2 = .55
+    }
     return {
       // The shoulders and pelvis descend together as a single body when the
       // character sits. The forearms then reach the fixed desktop height.
       shoulder: [side * .37, 1.66 - seated * .4, -.02] as RigPoint,
-      elbow: [side * (.44 + seated * .06) - contemplation * .04,
-        elbowY + coffeeAmount * (1.43 - elbowY),
-        elbowZ + coffeeAmount * (.20 - elbowZ)] as RigPoint,
-      wrist: [wristX - contemplation * .26 + coffeeAmount * (.34 - sip * .25 - wristX + contemplation * .26),
-        wristY + coffeeAmount * (1.34 + sip * .395 - wristY),
-        wristZ + coffeeAmount * (.31 - sip * .15 - wristZ)] as RigPoint,
+      elbow: [elbowX,
+        elbowY2 + coffeeAmount * (1.43 - elbowY2),
+        elbowZ2 + coffeeAmount * (.20 - elbowZ2)] as RigPoint,
+      wrist: [wristX2 - contemplation * .26 + coffeeAmount * (.34 - sip * .25 - wristX2 + contemplation * .26),
+        wristY2 + coffeeAmount * (1.34 + sip * .395 - wristY2),
+        wristZ2 + coffeeAmount * (.31 - sip * .15 - wristZ2)] as RigPoint,
     }
   }) as [Arm, Arm]
   const shoePitch: [number, number] = [0, 0]
@@ -94,11 +130,13 @@ export function makeAvatarRigPose(seatedInput: number, walking: boolean | number
   }) as [Leg, Leg]
   return {
     torsoDrop: seated * .4,
-    headPitch: activity === 'researching' ? -.09 : activity === 'error' ? .14 : stride * Math.sin(gaitPhase * 2) * .018,
-    headRoll: activity === 'thinking' ? Math.sin(seconds * 1.2) * .035 : stride * Math.sin(gaitPhase) * .018,
+    headPitch: activity === 'researching' ? -.09 : activity === 'error' ? .14 : activity === 'celebrating' ? -.06 : activity === 'blocked' ? .05
+      : activity === 'reading' ? .12 : activity === 'napping' ? .22 : activity === 'pouring' ? .1 : stride * Math.sin(gaitPhase * 2) * .018,
+    headRoll: activity === 'thinking' ? Math.sin(seconds * 1.2) * .035 : activity === 'napping' ? Math.sin(seconds * .8) * .02 : stride * Math.sin(gaitPhase) * .018,
     // Calm breathing keeps idle characters alive without suggesting speech
-    // or a conversation that did not occur.
-    bob: Math.sin(seconds * 2.1) * .008 * (1 - stride) * (1 - seated * .2),
+    // or a conversation that did not occur. A nap breathes slower and shallower.
+    bob: activity === 'napping' ? Math.sin(seconds * 1.1) * .005 * (1 - stride) * (1 - seated * .2)
+      : Math.sin(seconds * 2.1) * .008 * (1 - stride) * (1 - seated * .2),
     shoePitch,
     arms,
     legs,

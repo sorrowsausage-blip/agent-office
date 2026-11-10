@@ -1,8 +1,8 @@
-import { FolderOpen, Languages, Radio, ShieldCheck, Palette } from 'lucide-react';
+import { Activity, FolderOpen, Languages, Radio, ShieldCheck, Palette } from 'lucide-react';
 import type { ServerState } from '../types';
 import { useLanguage, languages, type Locale } from '../locales/i18n';
 import { useOfficePreferences } from '../scene/OfficePreferencesContext';
-import { DEFAULT_OFFICE_PREFERENCES, type OfficeTheme, type OfficeSpacing, type OfficeMotion } from '../scene/officePreferences';
+import { DEFAULT_OFFICE_PREFERENCES, type ActivityRate, type OfficeTheme, type OfficeSpacing, type OfficeMotion, type PerformanceMode } from '../scene/officePreferences';
 import { DEPARTMENTS } from '../agents';
 
 export function Settings({ workspace, setWorkspace, demo, setDemo, server, online, publicPreview = false }: {
@@ -45,6 +45,30 @@ export function Settings({ workspace, setWorkspace, demo, setDemo, server, onlin
           </label>)}
         </div>
         <button className="office-reset" type="button" onClick={() => updatePreferences(DEFAULT_OFFICE_PREFERENCES)}>{tr('Restore office defaults')}</button>
+      </section>
+      <section className="setting-card office-behavior">
+        <div className="setting-heading"><Activity size={22}/><div><h2>{tr('Agent behavior')}</h2><p>{tr('How agents move, rest and think in the office. Saved only in this browser.')}</p></div></div>
+        <div className="office-options">
+          <div><label htmlFor="office-activity-rate">{tr('Activity rate')}</label><select id="office-activity-rate" value={preferences.activityRate} onChange={e => updatePreferences({ activityRate: e.target.value as ActivityRate })}>
+            <option value="low">{tr('Low')}</option><option value="normal">{tr('Normal')}</option><option value="high">{tr('High')}</option>
+          </select></div>
+          <div><label htmlFor="office-performance">{tr('Performance mode')}</label><select id="office-performance" value={preferences.performanceMode} onChange={e => updatePreferences({ performanceMode: e.target.value as PerformanceMode })}>
+            <option value="auto">{tr('Auto')}</option><option value="balanced">{tr('Balanced')}</option><option value="quality">{tr('Quality')}</option>
+          </select></div>
+        </div>
+        <div className="setting-row"><div><strong>{tr('Break animations')}</strong><span>{tr('Coffee, rest and whiteboard visits while idle')}</span></div>
+          <button className={`switch ${preferences.breaksEnabled ? 'enabled' : ''}`} onClick={() => updatePreferences({ breaksEnabled: !preferences.breaksEnabled })} aria-pressed={preferences.breaksEnabled} aria-label={tr('Break animations')}><span /></button>
+        </div>
+        <div className="setting-row"><div><strong>{tr('Random movement')}</strong><span>{tr('Idle wandering between desks and break spots')}</span></div>
+          <button className={`switch ${preferences.wanderEnabled ? 'enabled' : ''}`} onClick={() => updatePreferences({ wanderEnabled: !preferences.wanderEnabled })} aria-pressed={preferences.wanderEnabled} aria-label={tr('Random movement')}><span /></button>
+        </div>
+        <div className="setting-row"><div><strong>{tr('Ambient animation')}</strong><span>{tr('Natural light drift, thinking lightbulb, office cat')}</span></div>
+          <button className={`switch ${preferences.ambientEnabled ? 'enabled' : ''}`} onClick={() => updatePreferences({ ambientEnabled: !preferences.ambientEnabled })} aria-pressed={preferences.ambientEnabled} aria-label={tr('Ambient animation')}><span /></button>
+        </div>
+        <div className="setting-row"><div><strong>{tr('Window thinking')}</strong><span>{tr('Let planning agents think at the window')}</span></div>
+          <button className={`switch ${preferences.windowThinkingEnabled ? 'enabled' : ''}`} onClick={() => updatePreferences({ windowThinkingEnabled: !preferences.windowThinkingEnabled })} aria-pressed={preferences.windowThinkingEnabled} aria-label={tr('Window thinking')}><span /></button>
+        </div>
+        <p>{tr('Turning off breaks, wandering, ambient animation and window thinking only hides decoration. Real tasks keep running.')}</p>
       </section>
       <section className="setting-card">
         <div className="setting-heading"><Languages size={22}/><div><h2>{tr('Language')}</h2><p>{tr('Select your preferred interface language.')}</p></div></div>

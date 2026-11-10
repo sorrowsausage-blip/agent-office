@@ -2,7 +2,7 @@ export type AgentId = string
 export type Department = 'architecture' | 'engineering' | 'design' | 'quality' | 'research' | 'operations' | 'security' | 'data' | 'general'
 export type ProviderId = 'codex' | 'claude' | 'gemini'
 export interface ProviderInfo { id: ProviderId; name: string; available: boolean }
-export type TaskStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+export type TaskStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'queued'
 export type TaskPhase = 'thinking' | 'coding' | 'researching' | 'finishing' | 'idle'
 export interface OfficeAgent {
   id: AgentId
@@ -29,6 +29,10 @@ export interface OfficeTask {
   lastMessage: string
   events: TaskEvent[]
   threadId: string | null
+  // Phase 3a: handoff lineage + manual approval-wait flag. Both optional so
+  // older history files stay valid.
+  awaitingApproval?: boolean
+  dependsOn?: string
   failure?: string
   exitCode?: number | null
   usage?: { input_tokens?: number; output_tokens?: number } | null

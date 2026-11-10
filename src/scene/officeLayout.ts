@@ -3,8 +3,13 @@ import type { OfficeSpacing } from './officePreferences'
 
 export type Seat = { agent: OfficeAgent; position: [number, number, number]; sector: Department; sectorKey: string; placement: 'lead' | 'team' }
 export type Sector = { id: Department; key: string; center: [number, number, number]; width: number; depth: number; count: number; row: number }
-export type OfficeAmenity = { id: 'meeting' | 'coffee' | 'focus' | 'reception'; key: string; x: number; z: number; aisleZ: number; row: number }
-export type OfficeLayout = { sectors: Sector[]; seats: Seat[]; width: number; depth: number; spineX: number; passages: { x: number; z: number; width: number; depth: number }[]; amenities: OfficeAmenity[] }
+export type OfficeAmenity = { id: 'meeting' | 'coffee' | 'focus' | 'reception' | 'rest' | 'window'; key: string; x: number; z: number; aisleZ: number; row: number }
+// One sofa seat in the rest area, in floor coordinates (x east, z south).
+export type LivingSeat = { x: number; z: number }
+// Whiteboard collaboration zone: a single freestanding discussion spot, named
+// independently of the meeting area even though it reuses the Panel idea.
+export type CollabZone = { key: string; x: number; z: number; aisleZ: number; row: number }
+export type OfficeLayout = { sectors: Sector[]; seats: Seat[]; width: number; depth: number; spineX: number; passages: { x: number; z: number; width: number; depth: number }[]; amenities: OfficeAmenity[]; restSeats: LivingSeat[]; collabZone: CollabZone }
 
 const DEPARTMENT_ORDER: Department[] = ['architecture', 'engineering', 'quality', 'design', 'research', 'data', 'security', 'operations', 'general']
 
@@ -64,5 +69,30 @@ export function makeOfficeLayout(agents: OfficeAgent[], spacing: OfficeSpacing =
       z: row > 0 ? rowStarts[row] + 3.1 * scale : 10.1 * scale, aisleZ, row })
   })
   passages.push({ x: spineX, z: depth / 2, width: 2.2 * scale, depth: depth - 1.2 * scale })
-  return { sectors, seats, width, depth, spineX, passages, amenities }
+  // Living zones (phase 2) all live in the west service wing, west of the
+  // circulation spine and clear of every workstation, aisle and pantry mat:
+  // - pantry: no new amenity id, it is the existing 'coffee' corner per row,
+  //   dressed with pantry furniture in OfficeCampus.
+  // - rest: south-west corner below the last row's coffee point, where the
+  //   floor runs out (depth - 2.825 * scale to depth is free of aisles, which
+  //   never reach west of startX, and of the spine passage, which ends at
+  //   spineX - 1.1 * scale). Three sofa seats share one sofa, spaced so
+  //   four agents can rest at once without overlapping.
+  // - window: two thinking spots against the north glass facade, north of the
+  //   reception mat (which starts at z 1.6 * scale) and west of the bays.
+  // - collab: one freestanding whiteboard on the west glass wall in the free
+  //   band between the meeting circle (ends z 9.75 * scale) and the first
+  //   coffee point (mat starts at row height - 2.775 * scale). When there is
+  //   no meeting area the band below reception is used instead.
+  const lastRow = rowHeights.length - 1
+  const lastAisleZ = rowStarts[lastRow] + rowHeights[lastRow] + .55 * scale
+  const meeting = amenities.find(area => area.id === 'meeting')
+  const restZ = depth - 1.15 * scale
+  const restX = 3.0 * scale
+  amenities.push({ id: 'rest', key: 'rest', x: restX, z: restZ, aisleZ: lastAisleZ, row: lastRow })
+  const restSeats: LivingSeat[] = [-1.15, 0, 1.15].map(dx => ({ x: restX + dx, z: restZ }))
+  const windowSpots: LivingSeat[] = [1.6, 4.4].map(x => ({ x: x * scale, z: .75 * scale }))
+  windowSpots.forEach((spot, index) => amenities.push({ id: 'window', key: `window-${index}`, x: spot.x, z: spot.z, aisleZ: 0, row: 0 }))
+  const collabZone: CollabZone = { key: 'collab', x: 1.6 * scale, z: meeting ? 10.2 * scale : 6.0 * scale, aisleZ: lastAisleZ, row: 0 }
+  return { sectors, seats, width, depth, spineX, passages, amenities, restSeats, collabZone }
 }
